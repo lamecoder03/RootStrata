@@ -8,3 +8,4 @@ scipy>=1.11          # correlation p-values, statistical tests in the toolkit
 matplotlib>=3.8      # the 1-2 report charts
 openai>=1.40         # OpenAI-compatible client, pointed at the Groq endpoint
 python-dotenv>=1.0   # loads GROQ_API_KEY from .env
+pytest>=8.0          # guardrail tests: the cap, the audit log's append-only property, validation

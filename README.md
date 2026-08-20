@@ -3,8 +3,8 @@
 Point it at a CSV it has never seen. It decides what is worth investigating, investigates,
 and writes a markdown findings report with supporting charts.
 
-> **Status: Day 1 — scaffold.** The profiler and eval fixtures work. The toolkit, guardrails
-> and agent loop are not written yet.
+> **Status: Day 2 complete.** Profiler, the five-function toolkit and all three guardrails are
+> built and tested. The agent's planning loop is next.
 
 ---
 
@@ -47,10 +47,16 @@ agent — except every CSV has a different schema, so the allowlist is validated
 pip install -r requirements.txt
 cp .env.example .env        # then add your GROQ_API_KEY
 
+python walkthrough.py       # the guided tour: real calls, real refusals, real audit log
+python -m pytest            # 81 assertions behind it
+
 python data/generate_test_datasets.py                          # rebuild the eval fixtures
-python -m profiling.profiler data/test_datasets/marketing_weekly.csv
 python -m profiling.profiler data/test_datasets/marketing_weekly.csv --json
 ```
+
+`walkthrough.py` is the fastest way to see what this project actually does: it drives the
+toolkit by hand across all three datasets, mixes legitimate calls with deliberately invalid
+ones, and prints the audit log of everything it tried.
 
 ## Layout
 
@@ -59,12 +65,37 @@ data/
   generate_test_datasets.py   seeded, reproducible fixture generator
   test_datasets/              the three eval CSVs (committed)
 profiling/profiler.py         any CSV -> row count, dtypes, missing %, roles, stats
-toolkit/                      the fixed allowlisted analysis functions   (Day 2)
-guardrails/                   allowlist, call cap, audit log             (Day 2)
+toolkit/
+  functions.py                the 5 analysis primitives, every output bounded
+  registry.py                 the allowlist: what is callable, with which argument roles
+guardrails/
+  validator.py                allowlist + runtime-schema argument checking
+  call_cap.py                 the ceiling that raises
+  audit.py                    append-only record of every attempt
+  executor.py                 the single door: cap -> validate -> run -> log
 agent/                        hand-written planning loop over Groq       (Day 3)
 reports/                      generated reports and charts (gitignored)
 eval/ground_truth.md          exactly what is planted in each dataset
+tests/                        pytest suite for the guardrails and toolkit
+walkthrough.py                narrative harness over all three datasets
 ```
+
+## The toolkit
+
+Five functions. That is the complete action space.
+
+| function | what it answers |
+|---|---|
+| `get_summary_stats(column)` | centre, spread, quartiles, missingness |
+| `compute_correlation(col_a, col_b, group_by=None)` | how two numerics move together — and whether that survives a subgroup split |
+| `detect_outliers(column, method)` | which rows are extreme, by z-score or IQR fence |
+| `group_compare(group_col, value_col)` | how a measure differs across segments |
+| `value_counts(column)` | the distribution of a categorical |
+
+`compute_correlation`'s `group_by` is the one that matters for the trap dataset: it returns the
+pooled r *and* the r inside every subgroup, with explicit `sign_reversal` and `attenuated` flags.
+Those are arithmetic, not judgment — the agent still has to decide what they mean, but it does not
+have to notice them on its own.
 
 ## Eval datasets
 
@@ -89,5 +120,5 @@ can be explained line by line.
 ## Roadmap
 
 - [x] **Day 1** — scaffold, profiler, eval fixtures, ground truth
-- [ ] **Day 2** — the toolkit and the three guardrails
+- [x] **Day 2** — the toolkit, the three guardrails, tests, walkthrough
 - [ ] **Day 3** — the agent loop, report writer, charts, and grading against ground truth
