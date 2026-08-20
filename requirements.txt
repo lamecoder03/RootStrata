@@ -1,0 +1,10 @@
+# AutoSight runtime dependencies.
+# Floors, not pins: these are the oldest versions the code is written against.
+# Verified locally on pandas 3.0.5 / numpy 2.5.1 / scipy 1.18.0 / matplotlib 3.11.1, Python 3.14.
+
+pandas>=2.2          # CSV loading, profiling, all toolkit analysis
+numpy>=1.26          # numerics underneath pandas; synthetic dataset generation
+scipy>=1.11          # correlation p-values, statistical tests in the toolkit
+matplotlib>=3.8      # the 1-2 report charts
+openai>=1.40         # OpenAI-compatible client, pointed at the Groq endpoint
+python-dotenv>=1.0   # loads GROQ_API_KEY from .env

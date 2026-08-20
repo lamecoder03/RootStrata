@@ -1,0 +1,22 @@
+# --- secrets ---
+.env
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- generated agent output (the fixtures in data/ ARE committed; these are not) ---
+reports/*
+!reports/.gitkeep
+
+# --- editors / os ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
