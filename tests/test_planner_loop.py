@@ -334,3 +334,77 @@ def test_the_trace_shows_the_reversal_and_the_rejection(training_kit):
     assert "## Final answer" in trace
     assert "## Audit log" in trace
     assert "System prompt" in trace                               # what it was given, in full
+
+
+# --- context management: the ledger and the trimmer ---------------------------------------------
+
+def test_the_ledger_records_every_call_and_survives_trimming(training_kit):
+    """Trimming compacts old results, so the ledger is what stops the agent re-running them."""
+    from agent.planner_loop import render_ledger, trim_transcript
+
+    kit = training_kit(max_calls=10)
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("get_summary_stats", {"column": "output_points"}, "c1")),
+        say("b", call("group_compare", {"group_col": "role_tier", "value_col": "output_points"}, "c2")),
+        say("c", call("group_compare", {"group_col": "employee_id", "value_col": "output_points"}, "c3")),
+        say("## Findings\nDone."),
+    ])
+    run = run_planner(kit, model, model_name="stub")
+
+    signatures = [signature for signature, _ in run.ledger]
+    assert len(run.ledger) == 3
+    assert "get_summary_stats(column='output_points')" in signatures
+    assert any("employee_id" in s for s in signatures)
+    assert any("refused" in headline for _, headline in run.ledger)   # refusals are remembered too
+
+    rendered = render_ledger(run.ledger)
+    assert "Do not repeat any of these calls" in rendered
+    assert "mean=" in rendered
+
+    # Even squeezed to nothing, the ledger message is inside the protected prefix and survives.
+    squeezed = trim_transcript(run.messages, {}, budget=1, protected=5)
+    assert any("Do not repeat any of these calls" in str(m.get("content")) for m in squeezed)
+    _assert_transcript_is_well_formed(squeezed)
+
+
+def test_the_ledger_is_rewritten_in_place_not_appended(training_kit):
+    """One ledger message, always current -- not a growing pile of stale ones."""
+    from agent.planner_loop import LEDGER_HEADER
+
+    kit = training_kit(max_calls=10)
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("get_summary_stats", {"column": "output_points"}, "c1")),
+        say("b", call("get_summary_stats", {"column": "tenure_months"}, "c2")),
+        say("## Findings\nDone."),
+    ])
+    run = run_planner(kit, model, model_name="stub")
+
+    ledgers = [m for m in run.messages if LEDGER_HEADER in str(m.get("content", ""))]
+    assert len(ledgers) == 1
+    assert "output_points" in ledgers[0]["content"]
+    assert "tenure_months" in ledgers[0]["content"]
+
+
+def test_trimming_compacts_old_results_before_dropping_anything(training_kit):
+    from agent.planner_loop import _estimate_tokens, _headline, trim_transcript
+
+    kit = training_kit(max_calls=10)
+    model = ScriptedModel(
+        [say(PLAN)]
+        + [say(f"s{i}", call("group_compare",
+                             {"group_col": "role_tier", "value_col": "output_points"}, f"c{i}"))
+           for i in range(5)]
+        + [say("## Findings\nDone.")]
+    )
+    run = run_planner(kit, model, model_name="stub")
+    headlines = {inv.call_id: _headline(inv) for t in run.turns for inv in t.invocations}
+
+    full = _estimate_tokens(run.messages)
+    compacted = trim_transcript(run.messages, headlines, budget=full - 200, protected=5)
+
+    assert _estimate_tokens(compacted) < full
+    assert len(compacted) == len(run.messages)          # compaction only, nothing dropped yet
+    assert any("payload compacted" in str(m.get("content")) for m in compacted)
+    _assert_transcript_is_well_formed(compacted)

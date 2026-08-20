@@ -19,7 +19,28 @@ from profiling.profiler import format_profile
 
 # LLM round trips, which is not the same budget as the tool-call cap: one turn can request several
 # calls, and a turn that only thinks costs no calls at all. Both ceilings are needed.
+#
+# This is a backstop against a loop that never converges, NOT the real budget - the call cap is.
+# In practice the model issues about one call per turn, so a turn ceiling near the call cap makes
+# turns the binding constraint and cuts investigations short for the wrong reason. run.py therefore
+# defaults it to comfortably above the call budget; this value only applies when nothing else does.
 MAX_TURNS = 14
+# Headroom over the call cap: the plan turn, the final write-up, and a few thinking turns.
+TURN_HEADROOM = 6
+
+# The transcript grows by a full tool result every turn, and Groq's free tier refuses a single
+# request larger than its whole per-minute token allowance (8000). So the loop manages its own
+# context: older tool payloads are compacted to their headline numbers, and if that is not enough,
+# the oldest exchanges are replaced by a note saying what ran.
+#
+# 4000 is calibrated, not guessed: the run that hit the limit was refused at 8074 real tokens and
+# this estimator scored that same transcript around 5450, so char/4 under-counts by roughly 1.4x.
+# 4000 estimated is about 5600 real, leaving room for a reasoning-heavy completion under the 8000 cap.
+CONTEXT_TOKEN_BUDGET = 4000
+# The most recent results stay in full — those are the ones the next decision depends on.
+KEEP_FULL_RESULTS = 3
+# Rough enough: this only decides *when* to compact, and compacting early is cheap.
+CHARS_PER_TOKEN = 4
 
 # What the five functions genuinely cannot do. Stated in the prompt so the agent declares a gap
 # instead of inventing an answer — the time-series absence is the one it will hit most often.
@@ -42,9 +63,20 @@ Good. The toolkit is now available to you.
 
 Work through that plan with tool calls. Revise it as results arrive - follow a surprising result,
 drop a dead end. Remember to stratify a correlation before concluding anything about it, and to
-localise any outliers you find before drawing a conclusion from them. When further calls would not
-change your conclusions, reply with no tool calls and your final answer under the required
-headings."""
+localise any outliers you find before drawing a conclusion from them.
+
+You may request several independent calls in one turn; there is no reason to wait a full round trip
+between two questions that do not depend on each other.
+
+A running list of every call you have already made, with its headline result, is kept at the top of
+this conversation. Consult it before calling anything: repeating a call you have already made spends
+budget and tells you nothing new. When further calls would not change your conclusions, reply with
+no tool calls and your final answer under the required headings."""
+
+LEDGER_HEADER = """\
+CALLS ALREADY MADE IN THIS RUN, with their headline results. This list is complete and is kept up
+to date for you. Do not repeat any of these calls - you already have the answer. Older results
+further down the conversation may have been compacted to save space; this list is the record."""
 
 SYSTEM_PROMPT = """\
 You are an autonomous data analyst. You have one CSV file and a fixed toolkit of five analysis
@@ -163,6 +195,9 @@ class PlannerRun:
     messages: list[dict[str, Any]] = field(default_factory=list)
     findings: str = ""
     stop_reason: str = ""
+    # (call signature, headline result) for every call made, in order. Never trimmed: this is what
+    # stops the agent re-running work whose full result has since been compacted out of the window.
+    ledger: list[tuple[str, str]] = field(default_factory=list)
     audit: AuditLog | None = None
     cap: CallCap | None = None
 
@@ -236,6 +271,7 @@ def run_planner(
     model_name: str = "",
     on_event: Callable[[str, Any], None] | None = None,
     plan_first: bool = True,
+    context_budget: int = CONTEXT_TOKEN_BUDGET,
 ) -> PlannerRun:
     """Drive the loop to a stopping point and return the whole run, transcript included.
 
@@ -261,14 +297,22 @@ def run_planner(
         audit=toolkit.audit,
         cap=toolkit.cap,
     )
+    # The ledger sits at a fixed index and is rewritten in place every turn. It lives inside the
+    # protected prefix, so trimming can compact the detailed results below it but can never remove
+    # the record that those calls happened — which is what stops the agent re-running them.
+    ledger_index = 2
     run.messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task_prompt},
+        {"role": "system", "content": render_ledger([])},
     ]
 
     def emit(event: str, payload: Any = None) -> None:
         if on_event is not None:
             on_event(event, payload)
+
+    # call_id -> one-line digest, used when an old tool payload has to be compacted away
+    headlines: dict[str, str] = {}
 
     first_index = 1
     if plan_first:
@@ -279,7 +323,12 @@ def run_planner(
         emit("plan", plan)
         first_index = 2
 
+    protected = len(run.messages)
+
     for index in range(first_index, max_turns + 1):
+        run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
+        run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
+                                       protected=protected)
         response = model.complete(run.messages, tools=tools)
         run.messages.append(assistant_message(response))
 
@@ -291,8 +340,13 @@ def run_planner(
             break
 
         emit("turn", (index, response))
-        invocations, exhausted = _run_tool_calls(toolkit, response.tool_calls, run.messages, emit)
+        invocations, exhausted = _run_tool_calls(
+            toolkit, response.tool_calls, run.messages, emit, headlines
+        )
         run.turns.append(_turn(index, response, invocations))
+        run.ledger += [
+            (_signature(inv.function, inv.arguments), _headline(inv)) for inv in invocations
+        ]
 
         if exhausted:
             run.stop_reason = "call cap reached"
@@ -302,6 +356,9 @@ def run_planner(
 
     if run.stop_reason != "model finished":
         emit("wrapping_up", run.stop_reason)
+        run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
+        run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
+                                       protected=protected)
         writeup = _forced_writeup(model, run.messages, run.stop_reason)
         run.turns.append(_turn(len(run.turns) + 1, writeup, (), kind="writeup"))
         run.findings = writeup.content
@@ -315,6 +372,7 @@ def _run_tool_calls(
     calls: tuple[ToolCall, ...],
     messages: list[dict[str, Any]],
     emit: Callable[[str, Any], None],
+    headlines: dict[str, str],
 ) -> tuple[tuple[ToolInvocation, ...], bool]:
     """Execute one turn's calls through the single door, appending a tool message for each.
 
@@ -351,6 +409,7 @@ def _run_tool_calls(
                 )
 
         invocations.append(invocation)
+        headlines[call.id] = _headline(invocation)
         messages.append(
             {"role": "tool", "tool_call_id": call.id, "content": _tool_payload(invocation)}
         )
@@ -369,6 +428,130 @@ def _failed(call: ToolCall, toolkit: GuardedToolkit, code: str, message: str) ->
         error=message,
         error_code=code,
     )
+
+
+def render_ledger(entries: list[tuple[str, str]]) -> str:
+    """The always-present memory of what has already been run, in one compact block."""
+    if not entries:
+        return LEDGER_HEADER + "\n\n(nothing yet)"
+    lines = [f"{i}. {signature} -> {headline}" for i, (signature, headline) in enumerate(entries, 1)]
+    return LEDGER_HEADER + "\n\n" + "\n".join(lines)
+
+
+def _signature(function: str, arguments: dict[str, Any]) -> str:
+    rendered = ", ".join(f"{key}={value!r}" for key, value in sorted(arguments.items()))
+    return f"{function}({rendered})"
+
+
+def _estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    """Cheap character-based estimate. Only used to decide when to compact, so precision is waste."""
+    return sum(len(json.dumps(message, default=str)) for message in messages) // CHARS_PER_TOKEN
+
+
+def _headline(invocation: ToolInvocation) -> str:
+    """The few numbers from a result that a later turn might still need to cite."""
+    if not invocation.ok:
+        return f"refused: {invocation.error_code}"
+    data = invocation.data or {}
+    if invocation.function == "compute_correlation":
+        overall = data.get("overall", {})
+        parts = [f"r={overall.get('pearson_r')}", f"n={overall.get('n')}"]
+        if data.get("group_by"):
+            parts.append(f"by {data['group_by']}: sign_reversal={data['sign_reversal']}, "
+                         f"attenuated={data['attenuated']}, "
+                         f"subgroup r {data['subgroup_r_min']}..{data['subgroup_r_max']}")
+        return "; ".join(parts)
+    if invocation.function == "detect_outliers":
+        return (f"{data.get('method')}: {data.get('n_outliers')} outliers of "
+                f"{data.get('n_present')} rows")
+    if invocation.function == "group_compare":
+        high, low = data.get("highest_group", {}), data.get("lowest_group", {})
+        return (f"{data.get('n_groups_total')} groups; highest {high.get('group')}"
+                f"={high.get('mean')}, lowest {low.get('group')}={low.get('mean')}, "
+                f"ratio {data.get('highest_over_lowest_ratio')}")
+    if invocation.function == "get_summary_stats":
+        return f"mean={data.get('mean')}, median={data.get('median')}, missing={data.get('missing_pct')}%"
+    if invocation.function == "value_counts":
+        return f"{data.get('n_distinct')} distinct, top={data.get('values', [{}])[0].get('value')}"
+    return "result elided"
+
+
+def trim_transcript(
+    messages: list[dict[str, Any]],
+    headlines: dict[str, str],
+    budget: int = CONTEXT_TOKEN_BUDGET,
+    protected: int | None = None,
+) -> list[dict[str, Any]]:
+    """Shrink the transcript to fit the budget, cheapest loss first.
+
+    Two passes, in order of what hurts least: compact old tool payloads down to their headline
+    numbers, and only if that is still not enough, drop whole old exchanges. Exchanges are dropped
+    as units — an assistant message with tool_calls and its tool replies go together, because a
+    tool_call without its reply makes the request malformed.
+    """
+    if _estimate_tokens(messages) <= budget:
+        return messages
+
+    trimmed = [dict(message) for message in messages]
+
+    tool_positions = [i for i, m in enumerate(trimmed) if m["role"] == "tool"]
+    for position in tool_positions[:-KEEP_FULL_RESULTS] if KEEP_FULL_RESULTS else tool_positions:
+        call_id = trimmed[position].get("tool_call_id", "")
+        headline = headlines.get(call_id)
+        if headline is None:
+            continue
+        compacted = json.dumps({"ok": None, "summary": headline, "note": "payload compacted"})
+        if len(compacted) < len(trimmed[position]["content"]):
+            trimmed[position]["content"] = compacted
+        if _estimate_tokens(trimmed) <= budget:
+            return trimmed
+
+    # Still over. Drop the oldest exchanges, keeping the protected prefix: the system prompt, the
+    # profile, the ledger, the plan and the message that handed over the toolkit.
+    prefix = _protected_prefix(trimmed) if protected is None else protected
+    while _estimate_tokens(trimmed) > budget:
+        end = _first_exchange_end(trimmed, prefix)
+        if end is None:
+            break
+        dropped = [m for m in trimmed[prefix:end] if m["role"] == "assistant"]
+        names = sorted({
+            c["function"]["name"] for m in dropped for c in m.get("tool_calls", [])
+        })
+        note = {
+            "role": "assistant",
+            "content": f"[earlier turn elided to stay within the context budget; it ran: "
+                       f"{', '.join(names) or 'no tools'}]",
+        }
+        trimmed = trimmed[:prefix] + [note] + trimmed[end:]
+        prefix += 1
+
+    return trimmed
+
+
+def _protected_prefix(messages: list[dict[str, Any]]) -> int:
+    """How many leading messages are never dropped: the system prompt, the profile, and the plan."""
+    prefix = 0
+    for message in messages:
+        if message["role"] in ("system", "user") or not message.get("tool_calls"):
+            prefix += 1
+        else:
+            break
+        if prefix >= 4:
+            break
+    return prefix
+
+
+def _first_exchange_end(messages: list[dict[str, Any]], start: int) -> int | None:
+    """Index just past the first assistant-plus-tool-replies block at or after `start`."""
+    index = start
+    while index < len(messages) and messages[index]["role"] != "assistant":
+        index += 1
+    if index >= len(messages):
+        return None
+    end = index + 1
+    while end < len(messages) and messages[end]["role"] == "tool":
+        end += 1
+    return end if end < len(messages) else None
 
 
 def _tool_payload(invocation: ToolInvocation) -> str:

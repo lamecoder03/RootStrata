@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.llm import DEFAULT_REASONING_EFFORT, GroqClient, MissingCredentials
-from agent.planner_loop import MAX_TURNS, run_planner
+from agent.planner_loop import CONTEXT_TOKEN_BUDGET, MAX_TURNS, TURN_HEADROOM, run_planner
 from agent.trace import write_trace
 from guardrails.audit import AuditLog
 from guardrails.call_cap import DEFAULT_MAX_CALLS
@@ -30,9 +30,19 @@ def _wrap(text: str, prefix: str = "    ") -> str:
 
 
 def make_reporter(quiet: bool):
-    """Stream the run to the terminal as it happens. Events come from the loop, not from guessing."""
+    """Stream the run to the terminal as it happens. Events come from the loop, not from guessing.
+
+    Every print is wrapped: the console is a progress display, and a display problem must never
+    destroy a run that has already spent real API budget. The trace file is the durable record.
+    """
 
     def report(event: str, payload: Any) -> None:
+        try:
+            _report(event, payload)
+        except Exception as exc:                       # noqa: BLE001 - printing is best-effort
+            print(f"  [could not render this event: {type(exc).__name__}]")
+
+    def _report(event: str, payload: Any) -> None:
         if quiet:
             return
         if event == "plan":
@@ -75,15 +85,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS,
                         help=f"tool-call budget (default {DEFAULT_MAX_CALLS})")
-    parser.add_argument("--max-turns", type=int, default=MAX_TURNS,
-                        help=f"LLM round-trip ceiling (default {MAX_TURNS})")
+    parser.add_argument("--max-turns", type=int, default=None,
+                        help=f"LLM round-trip ceiling (default: max-calls + {TURN_HEADROOM}, so the "
+                             f"call cap stays the binding budget)")
     parser.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR,
                         help="where to write the trace (default reports/traces/)")
+    parser.add_argument("--context-budget", type=int, default=CONTEXT_TOKEN_BUDGET,
+                        help=f"estimated prompt-token ceiling before the transcript is compacted "
+                             f"(default {CONTEXT_TOKEN_BUDGET}; raise it on a paid Groq tier)")
     parser.add_argument("--model", default=None, help="override GROQ_MODEL")
     parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT,
                         choices=["low", "medium", "high"])
     parser.add_argument("--quiet", action="store_true", help="suppress the live stream")
     args = parser.parse_args(argv)
+
+    # Model output is arbitrary Unicode and a Windows console defaults to cp1252, which raises on
+    # something as ordinary as a narrow no-break space. Replace rather than raise: losing a
+    # character from the live view is nothing, losing a paid-for run to a print() is not.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+    # The call cap is meant to be the budget that bites. Turns only backstop a non-converging loop,
+    # so they scale with it rather than sitting at a fixed number below it.
+    max_turns = args.max_turns or max(MAX_TURNS, args.max_calls + TURN_HEADROOM)
 
     csv_path = Path(args.csv_path)
     stem = csv_path.stem + ("_focused" if args.focus else "")
@@ -106,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         print("=" * WIDTH)
         print(f" {csv_path.name} -- {toolkit.profile['row_count']} rows x "
               f"{toolkit.profile['column_count']} columns")
-        print(f" model={model.model}  budget={args.max_calls} calls  "
+        print(f" model={model.model}  budget={args.max_calls} calls / {max_turns} turns  "
               f"focus={args.focus or 'none'}")
         print("=" * WIDTH)
 
@@ -114,9 +141,10 @@ def main(argv: list[str] | None = None) -> int:
         toolkit,
         model,
         focus=args.focus,
-        max_turns=args.max_turns,
+        max_turns=max_turns,
         model_name=model.model,
         on_event=make_reporter(args.quiet),
+        context_budget=args.context_budget,
     )
 
     paths = write_trace(run, trace_dir, stem)
