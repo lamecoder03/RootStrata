@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from agent.llm import ChatModel, LLMResponse, ToolCall, assistant_message, tools_for_profile
 from guardrails.audit import AuditLog
@@ -272,9 +272,12 @@ class PlannerRun:
     # Set when a model call failed and ended the run early. The trace reports it rather than
     # pretending the agent chose to stop.
     error: str | None = None
-    # (call signature, headline result) for every call made, in order. Never trimmed: this is what
-    # stops the agent re-running work whose full result has since been compacted out of the window.
+    # (call signature, headline result) for every DISTINCT call made, in the order first made. Never
+    # trimmed: this is what stops the agent re-running work whose full result has since been
+    # compacted out of the window. Deduplicated by signature — see `record_calls`.
     ledger: list[tuple[str, str]] = field(default_factory=list)
+    # signature -> how many times it has been requested. Only signatures asked more than once appear.
+    repeats: dict[str, int] = field(default_factory=dict)
     audit: AuditLog | None = None
     cap: CallCap | None = None
 
@@ -409,7 +412,7 @@ def run_planner(
     protected = len(run.messages)
 
     for index in range(first_index, max_turns + 1):
-        run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
+        run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger, run.repeats)}
         run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
                                        protected=protected, overhead=schema_overhead)
         response = _safe_complete(model, run.messages, tools, run)
@@ -430,9 +433,7 @@ def run_planner(
             toolkit, response.tool_calls, run.messages, emit, headlines
         )
         run.turns.append(_turn(index, response, invocations))
-        run.ledger += [
-            (_signature(inv.function, inv.arguments), _headline(inv)) for inv in invocations
-        ]
+        record_calls(run, invocations)
 
         if exhausted:
             run.stop_reason = "call cap reached"
@@ -444,7 +445,7 @@ def run_planner(
     # skips the write-up rather than spending a doomed request. The trace still gets written.
     if run.stop_reason != "model finished" and run.error is None:
         emit("wrapping_up", run.stop_reason)
-        run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
+        run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger, run.repeats)}
         run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
                                        protected=protected, overhead=schema_overhead)
         writeup = _safe_complete(model, run.messages, None, run, writeup_for=run.stop_reason)
@@ -553,11 +554,46 @@ def _failed(call: ToolCall, toolkit: GuardedToolkit, code: str, message: str) ->
     )
 
 
-def render_ledger(entries: list[tuple[str, str]]) -> str:
+def record_calls(run: PlannerRun, invocations: Sequence[ToolInvocation]) -> None:
+    """Fold this turn's calls into the ledger, deduplicated by call signature.
+
+    A repeat must not become a new numbered entry. When it did, the list grew every turn and read
+    like progress: one graded run issued the identical `compute_correlation(foot_traffic,
+    units_sold)` three times with a correct ledger in front of it each time, and the ledger showed
+    three separate lines rather than one line asked for three times.
+
+    The signature — same function, same arguments — is the identity. A repeat updates the existing
+    entry in place, keeping its original position because that is when the answer was obtained, and
+    increments a count that `render_ledger` surfaces. Note that the call cap is still charged for
+    it: the call was made, and the audit log records every attempt. What changes is only whether the
+    agent can see that it is asking again instead of advancing.
+    """
+    for invocation in invocations:
+        signature = _signature(invocation.function, invocation.arguments)
+        headline = _headline(invocation)
+        for position, (existing, _) in enumerate(run.ledger):
+            if existing == signature:
+                run.ledger[position] = (signature, headline)
+                run.repeats[signature] = run.repeats.get(signature, 1) + 1
+                break
+        else:
+            run.ledger.append((signature, headline))
+
+
+def render_ledger(entries: list[tuple[str, str]],
+                  repeats: dict[str, int] | None = None) -> str:
     """The always-present memory of what has already been run, in one compact block."""
     if not entries:
         return LEDGER_HEADER + "\n\n(nothing yet)"
-    lines = [f"{i}. {signature} -> {headline}" for i, (signature, headline) in enumerate(entries, 1)]
+    counts = repeats or {}
+    lines = []
+    for index, (signature, headline) in enumerate(entries, 1):
+        asked = counts.get(signature, 1)
+        # Naming the repetition is the point: the model that repeated a call had the answer in front
+        # of it and did not notice it was re-asking rather than progressing.
+        again = (f"   [ALREADY REQUESTED {asked} TIMES - the answer did not change, "
+                 f"and each attempt cost a call]") if asked > 1 else ""
+        lines.append(f"{index}. {signature} -> {headline}{again}")
     return LEDGER_HEADER + "\n\n" + "\n".join(lines)
 
 

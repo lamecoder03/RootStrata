@@ -368,6 +368,101 @@ def test_the_ledger_records_every_call_and_survives_trimming(training_kit):
     _assert_transcript_is_well_formed(squeezed)
 
 
+def _bare_run():
+    """A PlannerRun with only the fields record_calls touches, for testing the ledger in isolation."""
+    from agent.planner_loop import PlannerRun
+    return PlannerRun(source="x", focus=None, model_name="stub",
+                      system_prompt="", task_prompt="", profile={})
+
+
+def test_a_repeated_call_updates_its_ledger_entry_instead_of_adding_one(training_kit):
+    """Regression, from the Day 5 store_monthly_sales run: the agent issued the identical
+    compute_correlation three times with a correct ledger in front of it each time, and the ledger
+    showed three separate numbered lines. A growing list reads like progress."""
+    from agent.planner_loop import render_ledger
+
+    kit = training_kit(max_calls=10)
+    same = {"col_a": "weekly_training_hours", "col_b": "output_points"}
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("compute_correlation", same, "c1")),
+        say("b", call("compute_correlation", {"column": "output_points"}, "c2")),   # something else
+        say("c", call("compute_correlation", same, "c3")),                          # the repeat
+        say("d", call("compute_correlation", same, "c4")),                          # and again
+        say("## Findings\nDone."),
+    ])
+    run = run_planner(kit, model, model_name="stub")
+
+    signatures = [signature for signature, _ in run.ledger]
+    assert len(signatures) == len(set(signatures))              # no duplicate entries at all
+    assert sum(1 for s in signatures if "weekly_training_hours" in s) == 1
+    assert kit.cap.used == 4                                    # but every attempt still cost a call
+
+    rendered = render_ledger(run.ledger, run.repeats)
+    assert "ALREADY REQUESTED 3 TIMES" in rendered
+
+
+def test_a_repeat_keeps_its_original_position_and_refreshes_its_headline(training_kit):
+    """Position is when the answer was first obtained, so a repeat must not reorder the list."""
+    from agent.planner_loop import ToolInvocation, record_calls
+    from agent.planner_loop import PlannerRun
+
+    run = _bare_run()
+    first = ToolInvocation("c1", "value_counts", {"column": "region"}, True, 9,
+                           data={"n_distinct": 4, "values": [{"value": "North"}]})
+    second = ToolInvocation("c2", "get_summary_stats", {"column": "output_points"}, True, 8,
+                            data={"mean": 70.0, "median": 69.0, "missing_pct": 0.0})
+    again = ToolInvocation("c3", "value_counts", {"column": "region"}, True, 7,
+                           data={"n_distinct": 4, "values": [{"value": "South"}]})
+
+    record_calls(run, [first, second])
+    record_calls(run, [again])
+
+    assert [s for s, _ in run.ledger] == [
+        "value_counts(column='region')", "get_summary_stats(column='output_points')"
+    ]
+    assert run.ledger[0][1].endswith("top=South")        # the entry is refreshed, not stale
+    assert run.repeats == {"value_counts(column='region')": 2}
+
+
+def test_distinct_calls_are_never_collapsed(training_kit):
+    """The signature is function plus arguments: same function, different arguments is a new call,
+    and so is the same pair with a group_by added."""
+    from agent.planner_loop import ToolInvocation, PlannerRun, record_calls
+
+    run = _bare_run()
+    pair = {"col_a": "weekly_training_hours", "col_b": "output_points"}
+    record_calls(run, [
+        ToolInvocation("c1", "compute_correlation", pair, True, 9, data={"overall": {}}),
+        ToolInvocation("c2", "compute_correlation", {**pair, "group_by": "role_tier"}, True, 8,
+                       data={"overall": {}, "group_by": "role_tier", "sign_reversal": True,
+                             "attenuated": False, "subgroup_r_min": -0.6, "subgroup_r_max": -0.5}),
+        ToolInvocation("c3", "compute_correlation", {"col_a": "tenure_months",
+                                                     "col_b": "output_points"}, True, 7,
+                       data={"overall": {}}),
+    ])
+    assert len(run.ledger) == 3
+    assert run.repeats == {}
+
+
+def test_a_repeated_rejection_is_also_deduplicated(training_kit):
+    """Rejections are charged and remembered too, so an agent retrying a refused call unchanged
+    must see that it is retrying rather than making progress."""
+    kit = training_kit(max_calls=10)
+    bad = {"group_col": "employee_id", "value_col": "output_points"}
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("group_compare", bad, "c1")),
+        say("b", call("group_compare", bad, "c2")),
+        say("## Findings\nDone."),
+    ])
+    run = run_planner(kit, model, model_name="stub")
+
+    assert len(run.ledger) == 1
+    assert "refused" in run.ledger[0][1]
+    assert run.repeats[run.ledger[0][0]] == 2
+
+
 def test_the_ledger_is_rewritten_in_place_not_appended(training_kit):
     """One ledger message, always current -- not a growing pile of stale ones."""
     from agent.planner_loop import LEDGER_HEADER
