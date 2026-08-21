@@ -7,9 +7,13 @@ it is being held in reserve. Their Day 5 verdicts stand and are not re-graded he
 Trace: [`reports/traces/graded/day6/`](../reports/traces/graded/day6/). 12/12 calls, 14 turns,
 68,881 tokens, model finished and wrote up.
 
-## Verdict: PASS
+## Verdict: PARTIAL
 
-Graded against [`ground_truth.md`](ground_truth.md):
+**This was first graded PASS and the grade was wrong.** The correction, and the reasoning on both
+sides, is in the next section — it belongs at the top because the initial verdict was committed and
+should not stand uncontested.
+
+Against [`ground_truth.md`](ground_truth.md), the pass condition is met exactly:
 
 > **Pass** — identifies `STORE_07` as an outlier segment with a magnitude (~8x), and either omits
 > the November bump or labels it seasonality.
@@ -27,9 +31,56 @@ as typical, so neither fail condition is triggered.
 what `highest_over_lowest_ratio` actually measures. The Day 3 bug — reading that same 8.32 as "8.3×
 the overall mean" — does not recur.
 
+But the report also contains a second numbered finding that is the same anomaly one level coarser,
+carrying a claim its own evidence refutes. That caps it at partial.
+
 | Day 3 | Day 4 | Day 5 | Day 6 |
 |---|---|---|---|
-| not graded (diagnostic) | aborted, not gradeable | **PARTIAL** — blamed the East region | **PASS** — names STORE_07 at 8.32× |
+| not graded (diagnostic) | aborted, not gradeable | PARTIAL — blamed the East region | **PARTIAL** — names STORE_07 at 8.32×, then blames East anyway |
+
+---
+
+## Reconciling the verdict with the narrative
+
+Two statements were made about this run and they do not sit together: that it is a clean PASS, and
+that it is the first failure of "one signal is one finding". Both cannot be true of a graded report.
+
+**The case for PASS**, which is what the letter of the rubric supports:
+
+- The pass condition is met explicitly, with the right store, the right magnitude, and the right
+  denominator.
+- The rubric's partial clause reads *"finds an anomaly but misattributes it (e.g. blames the `North`
+  region rather than the store), **lists the same anomaly three times**, or reports `2024-11` as an
+  anomaly."* Nothing in it fires literally. It did not *mis*attribute — the store is named first and
+  correctly. It listed the anomaly **twice**, not three times. November is absent.
+- The capability under test — localise an anomaly to a segment, separate anomaly from seasonality —
+  was demonstrated.
+
+**The case for PARTIAL**, which is what I now think is right:
+
+1. **"Three times" is an observation, not a threshold.** That number came from a Day 3 diagnostic
+   where STORE_07 was reported across `revenue_usd`, `units_sold` and `foot_traffic` — three
+   columns. It describes the failure mode; it was never meant as a count that two occurrences slip
+   under. Grading on the letter while the plain intent is violated is the flattering reading, and
+   this document said in the Day 5 round that the flattering reading is not the one to take.
+2. **Finding 2 is not merely redundant, it is wrong.** "The difference persists across all stores"
+   was never tested — no within-region store comparison was run — and call 12 refutes it directly:
+   one store sits at 8.32× the lowest. A reader acting on finding 2 investigates regional market
+   dynamics, pricing and product mix. The actual answer is one store. That is a materially
+   misleading numbered finding in a graded report, not a stylistic blemish.
+3. **Consistency with `marketing_weekly` decides it.** That run named its planted finding correctly
+   and was still capped at partial *because it also reported a decoy as a finding*. The structure
+   here is identical: planted finding named correctly, plus an extra numbered finding that should
+   not be there. Applying a stricter standard to one dataset than the other would make the two
+   grades incomparable, which defeats the point of having a fixed rubric at all.
+
+**Verdict: PARTIAL.** The localisation is genuinely right and that is real progress from Day 5 —
+recorded plainly below — but a report that names the store and then tells the reader the region is
+the story has not finished the job.
+
+**What does not change.** Every factual observation in the three answers below stands: the call
+sequence, the duplicate refusal, the one-call margin, and the attribution evidence. Only the grade
+moved, and it moved because of evidence already written down here rather than anything new.
 
 ---
 
@@ -55,7 +106,8 @@ the overall mean" — does not recur.
 | **12** | **`group_compare(store_id, revenue_usd)`** | **the planted finding, on the last call** |
 
 So the answer to "before the budget ran low" is **no**. It arrived with zero budget remaining. The
-run passes on a one-call margin: had anything earlier cost one more call, this is a fail.
+localisation rests on a one-call margin: had anything earlier cost one more call, the store is never
+named and this is a fail rather than a partial.
 
 Two things follow. `detect_outliers` ran for the first time on this dataset in any round (34 of 288
 rows), and the run reached the plan's item 5 — *"detect_outliers on revenue_usd ... then group_compare
@@ -78,9 +130,10 @@ within a region, and its own call 12 shows one store at eight times the lowest.
 So the Day 5 misattribution is not repeated — the store is named first and correctly — but the
 region finding was not retired once the store explained it.
 
-**This is the first real test of "one signal is one finding", and it failed.** That rule has been
-carried as *untested* since Day 4 because the dataset that exercises it never completed. It has now
-run, and the run double-counted exactly the way the rule was written to prevent.
+**This is the first real test of "one signal is one finding", and it failed** — and it is why the
+grade is PARTIAL rather than PASS. That rule has been carried as *untested* since Day 4 because the
+dataset that exercises it never completed. It has now run, and the run double-counted exactly the
+way the rule was written to prevent.
 
 Two smaller defects in the same report:
 
@@ -156,19 +209,20 @@ prompt changes in place, and again with the reverse. That is two runs, and quota
 | `group_compare` "most specific key" line | no effect visible on call ordering |
 | Rule 1 (high r is a suspect) | held — both near-identities labelled construction artefacts, at low confidence |
 | Rule 2 (quote the flags) | held — all four stratified results quoted correctly |
-| **One signal is one finding** | **tested for the first time, and FAILED** — the region finding duplicates the store finding |
+| **One signal is one finding** | **tested for the first time, and FAILED** — the region finding duplicates the store finding, and is why this run is PARTIAL |
 
 ## What is owed
 
-1. **The one-signal rule needs work, and it is now measurable.** This run is the reproduction case:
+1. **The one-signal rule needs work, and it is now measurable — it is what stands between this run
+   and a pass.** This run is the reproduction case:
    `group_compare(region, …)` and `group_compare(store_id, …)` on the same column, reported as two
    findings, with the coarser one carrying an unsupported "persists across all stores".
 2. **Attribution**, if it matters enough to spend two runs: same dataset, one fix disabled at a time.
 3. `marketing_weekly` and `training_productivity` have not been run on Day 6 code. The prompt was
    rewritten around the two rules they verify, so those verdicts are stale even though the rules
    held here.
-4. The margin is one call. Twelve is not a comfortable budget for this dataset, and a pass that
-   depends on the last call is not a stable pass.
+4. The margin is one call. Twelve is not a comfortable budget for this dataset: the only finding
+   that earns the partial rather than a fail arrived on the last call the agent had.
 
 ## Reproducing this
 
