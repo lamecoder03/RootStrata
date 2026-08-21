@@ -33,13 +33,23 @@ TURN_HEADROOM = 6
 # context: older tool payloads are compacted to their headline numbers, and if that is not enough,
 # the oldest exchanges are replaced by a note saying what ran.
 #
-# 4400 is calibrated, not guessed: the run that hit the limit was refused at 8074 real tokens and
-# this estimator scored that same transcript around 5450, so char/4 under-counts by roughly 1.4x.
-# 4400 estimated is about 6200 real, which leaves room for a reasoning-heavy completion under the
-# 8000 cap. The budget covers the whole request - messages AND the tool schemas, which are resent
-# every turn and were previously uncounted, so the real requests were ~700 tokens over what the
-# estimator believed.
-CONTEXT_TOKEN_BUDGET = 4400
+# The number is calibrated, not guessed: the run that hit the limit was refused at 8074 real tokens
+# and this estimator scored that same transcript around 5450, so char/4 under-counts by roughly
+# 1.48x. That ratio is a worst case — it was measured on an untrimmed transcript of dense JSON
+# payloads, which tokenise far worse than the English prose that dominates a trimmed one.
+#
+# 4900 estimated is therefore about 7250 real at worst, still under the 8000 cap with room for a
+# reasoning-heavy completion. It was raised from 4400 when the Day 5 prompt rules pushed the
+# un-droppable floor (see context_floor) above the old budget: at that point trimming had nothing
+# left it was allowed to drop, and every request would have gone out over budget. The budget covers
+# the whole request — messages AND the tool schemas, which are resent every turn.
+CONTEXT_TOKEN_BUDGET = 4900
+# What must stay free for live tool results after the un-droppable floor is paid for. Below this the
+# agent is reasoning entirely from compacted headlines, which is not worth spending a run on.
+MIN_RESULT_HEADROOM = 400
+# The written plan is protected too — it is an assistant message with no tool_calls, so it sits in
+# the prefix trimming never touches. It is model-written, so the floor budgets a nominal size.
+PLAN_ALLOWANCE = 400
 # The most recent results stay in full — those are the ones the next decision depends on.
 KEEP_FULL_RESULTS = 3
 # Rough enough: this only decides *when* to compact, and compacting early is cheap.
@@ -109,15 +119,44 @@ different ways a pooled correlation can be fake, and they are equally disqualify
   number is an artefact of mixing groups whose means differ. Report the within-group direction as
   the real one, name the grouping column as the confounder, and do not recommend acting on the
   pooled number.
-- "attenuated": true - the relationship VANISHES inside the subgroups: the strongest subgroup
-  correlation is less than half the pooled one. The pooled number is explained by the grouping
-  variable, not by the two columns you correlated. This is exactly as disqualifying as a reversal
-  and must be treated the same way. Do not present an attenuated pair as a finding about those two
-  columns. Do not call it strong, robust, or consistent. Do not give it high confidence. If there
-  is a finding here at all it is about the grouping variable, and the honest headline is that the
-  apparent relationship is explained away by it.
-- Both false - the relationship survived that particular split. That is a materially stronger
-  finding than an unstratified correlation of the same size, and worth saying out loud.
+- "attenuated": true - the relationship VANISHES inside the subgroups: the strongest subgroup r is
+  less than half the pooled one. The pooled number is explained by the grouping variable, not by
+  the two columns you correlated. Exactly as disqualifying as a reversal, and treated the same way:
+  do not present it as a finding about those two columns, do not call it strong, robust or
+  consistent, do not give it high confidence. If there is a finding here it is about the grouping
+  variable, and the honest headline is that the apparent relationship is explained away by it.
+- Both false - the relationship survived that split, which rules out that one grouping column as
+  the confounder. Say so, but do not stop there: the correlations that survive every split most
+  perfectly are the ones that are true by definition. Read the next rule first.
+
+AN UNUSUALLY HIGH CORRELATION IS A SUSPECT, NOT A HEADLINE
+
+A pooled r above roughly 0.95 is rarely a discovery about the world. It is usually a formula - a
+total against one of its own components, a quantity against what it was multiplied out of: revenue
+= units x price, impressions = spend x rate. Such an identity survives EVERY stratification
+perfectly, so a clean split on one tells you nothing at all.
+
+So above roughly 0.95 the question is not how confident to be. It is whether one column is DERIVED
+from the other: check the names, roles and units you were given, and ask what would have to be true
+of this data for the fit to be that tight. If it plausibly is a derivation, report it as a property
+of how the file was built - never as a finding about the world, never as your leading finding, and
+never with the words robust, strong or reliable, which do not describe an identity. If you truly
+cannot see a derivation, report it as an unexplained near-identity at low confidence, and still not
+first. A near-perfect correlation that survives stratification is the weakest evidence in the file,
+not the strongest: a high r is a reason to look harder, never confidence already earned.
+
+QUOTE THE FLAGS, NEVER RECOMPUTE THEM
+
+The toolkit computes those two flags and is the only authority on those two words. When you use
+either word about a pair, quote the value the tool returned for that exact pair and grouping -
+"attenuated: false, as returned by compute_correlation" - and never derive it from the subgroup
+numbers yourself. Your arithmetic does not overrule the flag, and claiming a reversal or an
+attenuation the flag does not support is a fabricated finding.
+
+Describing the pattern in words is welcome - which subgroups are weaker, where the spread is
+widest, that one sits above the pooled value - kept separate from the quoted flag. If your reading
+seems to disagree with the flag, say so plainly ("attenuated: false, though North's 0.28 is well
+below the pooled 0.45") rather than deciding it in favour of your own calculation.
 
 CONFIDENCE FOLLOWS THE WORST STRATIFICATION YOU RAN, NOT THE BEST
 
@@ -140,8 +179,8 @@ findings should be able to act on five different things.
 
 OTHER THINGS TO WEIGH
 
-- Not every strong correlation is a finding. Ask whether one column is mechanically derived from
-  the other, and whether the relationship is too self-evident to deserve a reader's attention.
+- Not every strong correlation is a finding. Some are too self-evident to deserve attention even
+  when nothing derives one column from the other.
 - detect_outliers tells you THAT some rows are extreme. It does not tell you what they are. Use
   group_compare to find which segment or period they belong to before drawing any conclusion from
   them. Consider whether an effect that shows up everywhere at once is really an anomaly.
@@ -177,7 +216,9 @@ Numbered, most important first, ONE distinct signal per entry - corroborating ev
 columns belongs inside the entry it supports, never as an entry of its own. For each: what you
 found, the specific numbers supporting it, every stratification you ran on that pair including any
 that undermined it, how confident you are, and any caveat a reader needs. Where stratification
-changed your reading of a relationship, say so explicitly.
+changed your reading of a relationship, say so explicitly. For every stratification you name, quote
+the sign_reversal and attenuated values the toolkit returned - do not restate them from your own
+reading of the subgroup numbers.
 
 ## Checked and not reported
 What you actually investigated that did not earn a place in the findings, one line each on why.
@@ -324,6 +365,8 @@ def run_planner(
 
     system_prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
     task_prompt = build_task_prompt(profile, focus, max_calls, tools)
+    # Before spending a single request: does anything fit alongside the fixed overhead?
+    check_context_headroom(context_floor(system_prompt, task_prompt, tools), context_budget)
 
     run = PlannerRun(
         source=profile["source"],
@@ -531,6 +574,44 @@ def _estimate_tokens(messages: list[dict[str, Any]], overhead: int = 0) -> int:
     """
     body = sum(len(json.dumps(message, default=str)) for message in messages) // CHARS_PER_TOKEN
     return body + overhead
+
+
+def context_floor(system_prompt: str, task_prompt: str, tools: list[dict[str, Any]]) -> int:
+    """Estimated size of the part of every request that trimming is never allowed to touch.
+
+    The system prompt, the profile, the ledger header, the written plan and the tool schemas go up
+    on every single turn and cannot be compacted or dropped. If that floor approaches the budget,
+    `trim_transcript` has nothing left it may remove and will hand back an over-budget request
+    anyway — silently, until the API refuses it mid-run. So the floor is measured up front rather
+    than discovered. The plan is model-written and so is counted at a nominal size; everything else
+    is measured exactly.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task_prompt},
+        {"role": "system", "content": render_ledger([])},
+        {"role": "assistant", "content": "x" * (PLAN_ALLOWANCE * CHARS_PER_TOKEN)},
+        {"role": "user", "content": BEGIN_PROMPT},
+    ]
+    return _estimate_tokens(messages, len(json.dumps(tools)) // CHARS_PER_TOKEN)
+
+
+def check_context_headroom(floor: int, budget: int = CONTEXT_TOKEN_BUDGET) -> int:
+    """Refuse to start a run whose fixed overhead leaves no room for results. Returns the headroom.
+
+    Raised rather than warned, and raised *before* the first request, because the alternative is a
+    run that burns real quota to reach an HTTP 413 — or worse, one that completes while reasoning
+    only from compacted headlines and looks like a genuine result.
+    """
+    headroom = budget - floor
+    if headroom < MIN_RESULT_HEADROOM:
+        raise ValueError(
+            f"context budget {budget} leaves {headroom} tokens for tool results after a fixed "
+            f"floor of {floor} (system prompt + profile + ledger + tool schemas); "
+            f"{MIN_RESULT_HEADROOM} is the minimum. Shorten the system prompt, or raise the budget "
+            f"if the model's request ceiling allows it."
+        )
+    return headroom
 
 
 def _headline(invocation: ToolInvocation) -> str:

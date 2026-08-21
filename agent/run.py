@@ -13,7 +13,8 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-from agent.llm import DEFAULT_REASONING_EFFORT, GroqClient, MissingCredentials
+from agent.llm import (DEFAULT_REASONING_EFFORT, DailyQuotaExhausted, GroqClient,
+                       MissingCredentials)
 from agent.planner_loop import CONTEXT_TOKEN_BUDGET, MAX_TURNS, TURN_HEADROOM, run_planner
 from agent.trace import write_trace
 from guardrails.audit import AuditLog
@@ -100,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT,
                         choices=["low", "medium", "high"])
     parser.add_argument("--quiet", action="store_true", help="suppress the live stream")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="start without checking the daily token budget first")
     args = parser.parse_args(argv)
 
     # Model output is arbitrary Unicode and a Windows console defaults to cp1252, which raises on
@@ -125,6 +128,15 @@ def main(argv: list[str] | None = None) -> int:
     except MissingCredentials as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    # Ask about the day's budget before creating an audit log or writing anything: a run that dies
+    # on quota three turns in leaves a trace that looks like a result and is not one.
+    if not args.skip_preflight:
+        try:
+            model.preflight()
+        except DailyQuotaExhausted as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
 
     toolkit = GuardedToolkit.from_csv(
         csv_path,

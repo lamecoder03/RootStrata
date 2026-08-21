@@ -423,6 +423,40 @@ def test_the_context_budget_covers_the_tool_schemas_too(training_kit):
     assert est(messages, overhead=700) - est(messages) == 700
 
 
+@pytest.mark.parametrize("dataset", ["marketing", "stores", "training"])
+def test_every_fixture_leaves_room_for_results_after_the_fixed_overhead(loaded, dataset):
+    """Regression: a prompt edit pushed the un-droppable floor past the budget on all three files.
+    Nothing failed — trimming simply had nothing it was allowed to drop, so every request would
+    have gone out over budget. This is the check that turns that into a red test, not a dead run."""
+    from agent.planner_loop import (SYSTEM_PROMPT, TOOLKIT_LIMITATIONS, build_task_prompt,
+                                    check_context_headroom, context_floor, MIN_RESULT_HEADROOM)
+
+    _, profile = loaded[dataset]
+    tools = tools_for_profile(profile)
+    system_prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
+    floor = context_floor(system_prompt, build_task_prompt(profile, None, 12, tools), tools)
+
+    assert check_context_headroom(floor) >= MIN_RESULT_HEADROOM
+
+
+def test_a_run_with_no_room_for_results_refuses_before_spending_a_request(training_kit):
+    """It raises, and it raises early. Discovering this at the API costs a real run's quota; worse,
+    a run that squeaks through reasons only from compacted headlines and still looks finished."""
+    from agent.planner_loop import check_context_headroom, context_floor
+
+    kit = training_kit(max_calls=4)
+    tools = tools_for_profile(kit.profile)
+    floor = context_floor("x" * 40_000, "task", tools)
+
+    with pytest.raises(ValueError, match="leaves .* tokens for tool results"):
+        check_context_headroom(floor)
+
+    model = ScriptedModel([say(PLAN)])
+    with pytest.raises(ValueError, match="fixed floor"):
+        run_planner(kit, model, context_budget=50)
+    assert model.seen == []          # not one request was sent
+
+
 # --- a dying API must not take the evidence with it ---------------------------------------------
 
 class FailingModel:

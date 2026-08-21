@@ -13,8 +13,15 @@ not evidence of quality — they are the record of how the failures were found. 
 - one signal reported as several findings (STORE_07 and "the East region" are the same store),
 - and an API failure destroying a run's trace entirely (`aborted-trap-run/`).
 
-## `graded/` — Day 4
+## `graded/` — one folder per grading round
 
-Fresh runs on the fixed code, never used for tuning. These are what `eval/day4_results.md` grades.
-Same discipline as never testing on your training data: the diagnostics shaped the fixes, so they
-cannot also be the evidence the fixes worked.
+Fresh runs on fixed code, never used for tuning. Same discipline as never testing on your training
+data: the runs that shaped a fix cannot also be the evidence the fix worked. Each round therefore
+gets its own folder and is never overwritten, so a regression stays visible next to the run it
+regressed from.
+
+- `graded/day4/` — the first fresh round, scored in `eval/day4_results.md`. Only `marketing_weekly`
+  finished; it **failed**, leading its report with the `impressions` tautology, and it is what
+  exposed the two bugs the Day 5 prompt rules address. The other two aborted on the daily token cap.
+- `graded/day5/` — fresh runs after the Day 5 rules (derived-identity check above r ≈ 0.95; flags
+  quoted from the toolkit rather than recomputed). Scored in `eval/day5_results.md`.

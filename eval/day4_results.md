@@ -20,7 +20,7 @@ trustworthy evidence and no conclusion drawn from it.
 
 **This document does not grade the Day 3 diagnostic traces.** Those runs are what the Day 4 fixes
 were derived from, so scoring the fixes against them would be marking my own homework. They are
-kept in `reports/traces/diagnostics/` as the debugging record; `reports/traces/graded/` holds the
+kept in `reports/traces/diagnostics/` as the debugging record; `reports/traces/graded/day4/` holds the
 fresh runs, and only those are scored here.
 
 ---
@@ -173,11 +173,11 @@ is still open.
 ## Reproducing this
 
 ```bash
-python -m agent.run data/test_datasets/<file>.csv --max-calls 12 --trace-dir reports/traces/graded
+python -m agent.run data/test_datasets/<file>.csv --max-calls 12 --trace-dir reports/traces/graded/day4
 python reports/generate_report.py data/test_datasets/<file>.csv \
-    --trace-dir reports/traces/graded --out-dir reports/generated
+    --trace-dir reports/traces/graded/day4 --out-dir reports/generated
 ```
 
-Every number quoted above is checkable: `reports/traces/graded/` holds the full transcripts and
+Every number quoted above is checkable: `reports/traces/graded/day4/` holds the full transcripts and
 audit logs, and `generate_report.py` rebuilds its evidence table by replaying the audit log through
 the toolkit, so a report can only ever cite a call that was actually made.

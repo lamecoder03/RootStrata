@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,10 +31,23 @@ DEFAULT_REASONING_EFFORT = "medium"
 
 MAX_RETRIES = 4
 BACKOFF_SECONDS = 2.0
+# How big a prompt preflight() sends. Large enough to be refused when only a few hundred tokens
+# remain — the case that twice let a doomed batch start — and small enough that paying it on every
+# run is cheap: ~3% of a run's ~60k. It is a real cost, paid to avoid a much larger wasted one.
+PREFLIGHT_TOKENS = 2_000
 
 
 class MissingCredentials(RuntimeError):
     """Raised when no GROQ_API_KEY is available, with the fix rather than a stack trace."""
+
+
+class DailyQuotaExhausted(RuntimeError):
+    """The per-day token allowance is gone. Distinct from a per-minute limit, which waiting fixes.
+
+    Retrying this is not slow, it is wrong: four backed-off attempts against a daily cap fail four
+    times and then report "failed after 4 attempts", which reads like a flaky network. Worse, a run
+    that starts on a nearly empty budget dies partway and leaves a trace that looks like evidence.
+    """
 
 
 @dataclass(frozen=True)
@@ -139,6 +153,33 @@ class GroqClient:
         self._reasoning_effort = reasoning_effort
         self._client = OpenAI(api_key=key, base_url=self.base_url)
 
+    def preflight(self, needed_tokens: int = PREFLIGHT_TOKENS) -> None:
+        """Check there is room for a real turn before starting a run. Raises DailyQuotaExhausted.
+
+        The naive check — send a tiny request and see if it works — is worse than useless: it passes
+        on the few hundred tokens left at the end of a quota and reports "quota is back", which is
+        how two batches of eval runs came to die partway through. A large `max_completion_tokens`
+        does not fix it either: the daily gate is measured on the PROMPT, so a one-line prompt is
+        waved through however much output it reserves. That was measured, not assumed — a probe
+        reserving 5,000 tokens passed with 1,146 left in the day.
+
+        So the prompt itself is padded to the size of a real turn. The cost is honest: about
+        `needed_tokens` when it passes, nothing when it fails, since a refused request is not
+        charged. And it answers a narrow question — whether ONE turn fits — not whether a whole run
+        will, which no probe can tell you.
+        """
+        padding = "the quick brown fox jumps over the lazy dog. " * (needed_tokens // 10)
+        try:
+            self._client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": f"Reply with one character: x\n{padding}"}],
+                max_completion_tokens=1,
+            )
+        except RateLimitError as exc:
+            if _is_daily_quota(exc):
+                raise DailyQuotaExhausted(_quota_message(exc)) from exc
+            # A per-minute limit says nothing about the day's budget, and waiting clears it.
+
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
@@ -168,7 +209,13 @@ class GroqClient:
                     last_error = exc
                     continue
                 raise
-            except (RateLimitError, APIConnectionError) as exc:
+            except RateLimitError as exc:
+                # Per-minute limits are what backoff is for. A per-day limit is not: it will still
+                # be there in eight seconds, so say so once and stop.
+                if _is_daily_quota(exc):
+                    raise DailyQuotaExhausted(_quota_message(exc)) from exc
+                last_error = exc
+            except APIConnectionError as exc:
                 last_error = exc
             except APIStatusError as exc:
                 if exc.status_code < 500:
@@ -177,6 +224,33 @@ class GroqClient:
             time.sleep(BACKOFF_SECONDS * (2**attempt))
 
         raise RuntimeError(f"Groq call failed after {MAX_RETRIES} attempts: {last_error}")
+
+
+def _is_daily_quota(exc: Exception) -> bool:
+    """Groq distinguishes the two limits only in the error text, so that is what we read."""
+    text = str(exc).lower()
+    return "tokens per day" in text or "(tpd)" in text
+
+
+def _quota_message(exc: Exception) -> str:
+    """Pull the numbers out of Groq's message so the caller learns how short it is, not just that.
+
+    The raw error is a JSON blob inside a Python exception string; the three numbers that decide
+    whether waiting is worth it are buried in prose. Falls back to the whole text if the shape
+    changes, because a slightly ugly message beats a swallowed one.
+    """
+    text = str(exc)
+    numbers = re.search(r"Limit (\d+), Used (\d+), Requested (\d+)", text)
+    retry = re.search(r"try again in ([\dhms.]+)", text)
+    if not numbers:
+        return f"Groq daily token quota exhausted: {text}"
+    limit, used, requested = (int(g) for g in numbers.groups())
+    wait = f" Groq suggests retrying in {retry.group(1).rstrip(chr(46))}." if retry else ""
+    return (
+        f"Groq daily token quota exhausted: {used:,} of {limit:,} used, and this request needed "
+        f"{requested:,} more ({limit - used:,} left).{wait} A full run costs roughly 50-95k tokens, "
+        f"so it is worth waiting for real headroom rather than starting a run that will die partway."
+    )
 
 
 def _parse_completion(completion: Any) -> LLMResponse:
