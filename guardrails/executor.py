@@ -27,6 +27,21 @@ from profiling.profiler import load_csv, profile_dataframe
 from toolkit.registry import get_tool
 
 EXECUTION_ERROR = "EXECUTION_ERROR"
+DUPLICATE_CALL = "DUPLICATE_CALL"
+
+
+def call_signature(function_name: str, arguments: dict[str, Any] | None = None) -> str:
+    """The canonical identity of a call: its name and its arguments, order-independent.
+
+    Unset optional arguments are dropped, so `compute_correlation(a, b)` and the same call written
+    with an explicit `group_by=None` are one call rather than two. Computed from the *resolved*
+    arguments wherever possible, since that is the form the validator normalises to and therefore
+    the form two spellings of the same request converge on.
+    """
+    rendered = ", ".join(
+        f"{key}={value!r}" for key, value in sorted((arguments or {}).items()) if value is not None
+    )
+    return f"{function_name}({rendered})"
 
 
 @dataclass(frozen=True)
@@ -38,6 +53,11 @@ class ToolResult:
     data: dict[str, Any] | None = None
     error: str | None = None
     error_code: str | None = None
+    # The validator's normalised arguments, and the canonical signature built from them. The caller
+    # needs the signature to record what ran without re-deriving it from the raw request and
+    # disagreeing with this class about what counts as the same call.
+    resolved: dict[str, Any] | None = None
+    signature: str = ""
 
 
 class GuardedToolkit:
@@ -45,8 +65,14 @@ class GuardedToolkit:
 
     Call order is deliberate. The cap is charged *first*, before validation, so an agent that spams
     malformed calls still terminates — otherwise "rejected" would be a free action and a broken agent
-    could loop forever. Validation comes next, so a rejected call never reaches pandas. Everything,
-    including the refusals, is written to the audit log.
+    could loop forever. Validation comes next, so a rejected call never reaches pandas. Then the
+    duplicate check, which needs the validator's normalised arguments to recognise two spellings of
+    one call. Everything, including the refusals, is written to the audit log.
+
+    The duplicate check is *here* rather than in the prompt because showing the agent its own repeats
+    was tried and did not work: the ledger collapsed a repeated call, labelled it "ALREADY REQUESTED
+    4 TIMES", put it at the top of every request, and the agent issued it a fourth time anyway. An
+    annotation is advice. This is the only layer that can decline.
     """
 
     def __init__(
@@ -61,6 +87,10 @@ class GuardedToolkit:
         self._profile = profile
         self._cap = call_cap if call_cap is not None else CallCap(max_calls)
         self._audit = audit_log if audit_log is not None else AuditLog()
+        # signature -> the headline of the result it already produced. Only successful calls go in:
+        # a repeated *invalid* call must keep getting its own rejection, because that message names
+        # the columns that would have worked and is what the agent corrects from.
+        self._completed: dict[str, str] = {}
 
     @classmethod
     def from_csv(
@@ -103,7 +133,21 @@ class GuardedToolkit:
             resolved = validate_call(self._profile, function_name, attempted)
         except ValidationError as exc:
             self._audit.record(function_name, attempted, OUTCOME_REJECTED, detail=str(exc))
-            return ToolResult(ok=False, function=function_name, error=str(exc), error_code=exc.code)
+            return ToolResult(ok=False, function=function_name, error=str(exc), error_code=exc.code,
+                              signature=call_signature(function_name, attempted))
+
+        signature = call_signature(function_name, resolved)
+        if signature in self._completed:
+            message = (
+                f"This exact call has already run in this session and returned: "
+                f"{self._completed[signature]}. Running it again cannot produce a different answer — "
+                f"the data does not change between calls — so it is refused rather than executed. "
+                f"Use the result you already have, or ask a different question: change an argument, "
+                f"add a group_by, or call one of the other functions."
+            )
+            self._audit.record(function_name, resolved, OUTCOME_REJECTED, detail=message)
+            return ToolResult(ok=False, function=function_name, error=message,
+                              error_code=DUPLICATE_CALL, resolved=resolved, signature=signature)
 
         tool = get_tool(function_name)
         started = time.perf_counter()
@@ -114,13 +158,18 @@ class GuardedToolkit:
             detail = f"{type(exc).__name__}: {exc}"
             self._audit.record(function_name, resolved, OUTCOME_ERROR, detail=detail,
                                duration_ms=elapsed)
+            # Deliberately not remembered: a call that crashed produced no answer to reuse, and a
+            # toolkit bug that is fixed mid-session should not leave the call permanently refused.
             return ToolResult(ok=False, function=function_name, error=detail,
-                              error_code=EXECUTION_ERROR)
+                              error_code=EXECUTION_ERROR, resolved=resolved, signature=signature)
 
         elapsed = (time.perf_counter() - started) * 1000
+        summary = _summarise(data)
         self._audit.record(function_name, resolved, OUTCOME_ALLOWED, duration_ms=elapsed,
-                           result_summary=_summarise(data))
-        return ToolResult(ok=True, function=function_name, data=data)
+                           result_summary=summary)
+        self._completed[signature] = summary
+        return ToolResult(ok=True, function=function_name, data=data, resolved=resolved,
+                          signature=signature)
 
 
 def _summarise(data: dict[str, Any]) -> str:

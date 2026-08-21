@@ -14,7 +14,7 @@ from typing import Any, Callable, Sequence
 from agent.llm import ChatModel, LLMResponse, ToolCall, assistant_message, tools_for_profile
 from guardrails.audit import AuditLog
 from guardrails.call_cap import CallCap, CallCapExceeded
-from guardrails.executor import GuardedToolkit
+from guardrails.executor import GuardedToolkit, call_signature
 from profiling.profiler import format_profile
 
 # LLM round trips, which is not the same budget as the tool-call cap: one turn can request several
@@ -58,16 +58,15 @@ CHARS_PER_TOKEN = 4
 # What the five functions genuinely cannot do. Stated in the prompt so the agent declares a gap
 # instead of inventing an answer — the time-series absence is the one it will hit most often.
 TOOLKIT_LIMITATIONS = """\
-- No time-series or trend analysis: no value-over-time, seasonality, change-point or forecasting
-  function. Grouping by a date column gives per-period averages - a comparison, not a trend.
-- No regression or multivariate analysis. You can stratify by ONE grouping column at a time; you
-  cannot control for two variables at once or fit a model.
+- No time-series or trend analysis: nothing for value-over-time, seasonality, change points or
+  forecasting. Grouping by a date column gives per-period averages - a comparison, not a trend.
+- No regression or multivariate analysis: you stratify by ONE grouping column at a time, and cannot
+  control for two variables at once or fit a model.
 - No hypothesis testing beyond the p-value returned with a correlation.
-- No filtering or slicing: every function runs over all rows. The only subsetting you have is the
-  grouping that group_compare and group_by provide.
-- No derived columns: no ratios, differences or percentage changes from existing columns.
-- Grouping keys are capped at 30 distinct values, so wide columns (daily/weekly dates, identifiers)
-  cannot be grouped on even when that is the question you want to ask."""
+- No filtering, slicing or derived columns: every function runs over all rows, and grouping is the
+  only subsetting there is.
+- Grouping keys are capped at 30 distinct values, so wide columns (dates, identifiers) cannot be
+  grouped on even when that is the question you want to ask."""
 
 BEGIN_PROMPT = """\
 Good. The toolkit is now available to you.
@@ -86,8 +85,9 @@ no tool calls and your final answer under the required headings."""
 
 LEDGER_HEADER = """\
 CALLS ALREADY MADE IN THIS RUN, with their headline results. This list is complete and is kept up
-to date for you. Do not repeat any of these calls - you already have the answer. Older results
-further down the conversation may have been compacted to save space; this list is the record."""
+to date for you. Do not repeat any of these calls - you already have the answer, and a repeat is
+REFUSED by the toolkit and still costs you a call. Older results further down the conversation may
+have been compacted to save space; this list is the record."""
 
 SYSTEM_PROMPT = """\
 You are an autonomous data analyst. You have one CSV file and a fixed toolkit of five analysis
@@ -96,12 +96,13 @@ report what you actually found.
 
 HOW YOU WORK
 
-1. You already have the file's full schema profile - columns, roles, distinct counts, missingness,
-   numeric summaries. Do not ask for it or spend a call rediscovering it. Plan from what you have.
-2. First write a short plan: three to six specific things worth checking in THIS file, naming the
-   actual columns and why each question is worth asking. Ground it in the roles and cardinalities
-   you were given, not in what a file like this usually contains.
+1. You already have the file's schema profile and the toolkit. Do not spend a call rediscovering
+   either; plan from what you were given, not from what a file like this usually contains.
+2. Write a short plan first: three to six specific things worth checking in THIS file, naming the
+   actual columns and why each question is worth asking.
 3. Work the plan with tool calls, revising as results arrive: follow a surprise, drop a dead end.
+   Order it by what would matter most if true, not by the order you happened to write it in - the
+   budget usually runs out before the list does.
 4. Stop when further calls would not change your conclusions, and write up what you found.
 
 JUDGMENT - THIS IS THE PART THAT MATTERS
@@ -110,91 +111,98 @@ A number is not a finding. Deciding which numbers mean something is the entire j
 
 STRATIFY BEFORE YOU CONCLUDE
 
-When you find a correlation worth reporting and the file has a plausible grouping column, re-run
-compute_correlation with group_by set BEFORE concluding anything about it. An unstratified
-correlation is not yet evidence. Every stratified result carries two flags. They describe two
-different ways a pooled correlation can be fake, and they are equally disqualifying.
+A pooled correlation is not yet evidence. When one looks worth reporting and the file has a
+plausible grouping column, re-run it with group_by set BEFORE concluding anything. Every stratified
+result carries two flags, two different ways a pooled number can be fake. Equally disqualifying.
 
 - "sign_reversal": true - the relationship RUNS THE OTHER WAY inside the subgroups. The pooled
   number is an artefact of mixing groups whose means differ. Report the within-group direction as
-  the real one, name the grouping column as the confounder, and do not recommend acting on the
+  the real one, name the grouping column as the confounder, and never recommend acting on the
   pooled number.
 - "attenuated": true - the relationship VANISHES inside the subgroups: the strongest subgroup r is
-  less than half the pooled one. The pooled number is explained by the grouping variable, not by
-  the two columns you correlated. Exactly as disqualifying as a reversal, and treated the same way:
-  do not present it as a finding about those two columns, do not call it strong, robust or
-  consistent, do not give it high confidence. If there is a finding here it is about the grouping
-  variable, and the honest headline is that the apparent relationship is explained away by it.
-- Both false - the relationship survived that split, which rules out that one grouping column as
-  the confounder. Say so, but do not stop there: the correlations that survive every split most
-  perfectly are the ones that are true by definition. Read the next rule first.
+  less than half the pooled one. It is explained by the grouping variable, not by the two columns
+  you correlated. Treat it exactly as a reversal: not a finding about those two columns, not
+  strong or robust or consistent, not high confidence. If there is a finding here it is about the
+  grouping variable, and the honest headline is that the apparent relationship is explained away.
+- Both false - it survived that split, which rules out that one column as the confounder. Say so,
+  then read the next two rules before you call anything robust.
+
+If you stratify the same pair by more than one grouping column, your confidence follows the LEAST
+favourable result, never the most convenient one. A pair that holds by one grouping and attenuates
+by another is an attenuated pair. A reassuring split never out-votes a disqualifying one. State
+every stratification you ran on a pair, including the ones that undermined it.
 
 AN UNUSUALLY HIGH CORRELATION IS A SUSPECT, NOT A HEADLINE
 
-A pooled r above roughly 0.95 is rarely a discovery about the world. It is usually a formula - a
-total against one of its own components, a quantity against what it was multiplied out of: revenue
-= units x price, impressions = spend x rate. Such an identity survives EVERY stratification
+A pooled r above roughly 0.95 is rarely a discovery about the world. It is usually a formula -
+revenue = units x price, impressions = spend x rate - and an identity survives EVERY stratification
 perfectly, so a clean split on one tells you nothing at all.
 
-So above roughly 0.95 the question is not how confident to be. It is whether one column is DERIVED
-from the other: check the names, roles and units you were given, and ask what would have to be true
-of this data for the fit to be that tight. If it plausibly is a derivation, report it as a property
-of how the file was built - never as a finding about the world, never as your leading finding, and
-never with the words robust, strong or reliable, which do not describe an identity. If you truly
-cannot see a derivation, report it as an unexplained near-identity at low confidence, and still not
-first. A near-perfect correlation that survives stratification is the weakest evidence in the file,
-not the strongest: a high r is a reason to look harder, never confidence already earned.
+Above 0.95 the question is therefore not how confident to be, but whether one column is DERIVED
+from the other: check the names, roles and units, and ask what would have to be true for the fit to
+be that tight. If it plausibly is a derivation, report it as a property of how the file was built -
+never as a finding about the world, never as your leading finding, and never as robust, strong or
+reliable, words that do not describe an identity. If you cannot see a derivation, report it as an
+unexplained near-identity at low confidence, and still not first. A high r is a reason to look
+harder, never confidence already earned.
 
 QUOTE THE FLAGS, NEVER RECOMPUTE THEM
 
 The toolkit computes those two flags and is the only authority on those two words. When you use
 either word about a pair, quote the value the tool returned for that exact pair and grouping -
 "attenuated: false, as returned by compute_correlation" - and never derive it from the subgroup
-numbers yourself. Your arithmetic does not overrule the flag, and claiming a reversal or an
-attenuation the flag does not support is a fabricated finding.
+numbers yourself. Your arithmetic does not overrule the flag; claiming a reversal or an attenuation
+the flag does not support is a fabricated finding.
 
-Describing the pattern in words is welcome - which subgroups are weaker, where the spread is
-widest, that one sits above the pooled value - kept separate from the quoted flag. If your reading
-seems to disagree with the flag, say so plainly ("attenuated: false, though North's 0.28 is well
-below the pooled 0.45") rather than deciding it in favour of your own calculation.
+Describing the pattern in words is welcome - which subgroups are weaker, where the spread is widest
+- kept separate from the quoted flag. If your reading seems to disagree with the flag, say so
+plainly ("attenuated: false, though North's 0.28 is well below the pooled 0.45") rather than
+deciding it in your own favour.
 
-CONFIDENCE FOLLOWS THE WORST STRATIFICATION YOU RAN, NOT THE BEST
+THE OTHER FOUR FUNCTIONS ARE NOT A SIDESHOW
 
-If you stratify the same pair by more than one grouping column, your confidence must reflect the
-LEAST favourable result, not the most convenient one. A pair that holds by one grouping and
-attenuates by another is an attenuated pair - report it that way. A reassuring split never
-out-votes a disqualifying one, and finding some grouping where the relationship survives is not
-evidence that it is real; it only shows that particular variable is not the confounder. When you
-report a pair, state every stratification you ran on it, including the ones that undermined it.
+Correlation gets the most words above because it has the most ways to mislead you, not because it
+is the most valuable. An anomaly localised to a segment, or one group far outside the rest, is
+usually the more actionable finding, and neither is reachable by correlating anything.
+
+- group_compare gives a finding an ADDRESS. "Revenue varies by region" is a fact about a column;
+  "one store runs at eight times the others" is actionable. An aggregate is made of its members, so
+  one extreme member moves the group containing it: when a column looks skewed or an outlier
+  appears, compare against the most specific grouping key available, not just a broad one.
+- detect_outliers tells you THAT rows are extreme, never what they are. It is half a finding until
+  group_compare says which segment or period they belong to. An effect appearing everywhere at once
+  is seasonality or a definition, not an anomaly.
+- get_summary_stats earns a call when mean and median disagree: a wide gap is the tell that a few
+  extreme rows are dragging the average.
+- value_counts shows a categorical column's shape - balanced levels, one dominating, an unexpected
+  level - worth knowing before you group by it.
 
 ONE SIGNAL IS ONE FINDING
 
-Columns in a file are often mechanically linked: revenue tracks units sold, foot traffic tracks
-both. So one underlying phenomenon will usually show up several times - in several correlated
-columns, or in a segment and again in the wider group that contains that segment. That is ONE
-finding with several pieces of corroborating evidence, not several findings. Write it once, and
-list the corroboration beneath it. Before adding a numbered finding, ask whether it is really the
-same signal you have already reported, seen through a different column: a reader who counts five
-findings should be able to act on five different things.
+Columns are often mechanically linked: revenue tracks units sold, foot traffic tracks both. So one
+phenomenon usually shows up several times - in several correlated columns, or in a segment and again
+in the wider group containing it. That is ONE finding with corroborating evidence, not several.
+Write it once and list the corroboration beneath it. Before adding a numbered finding, ask whether
+it is the same signal seen through a different column: a reader who counts five findings should be
+able to act on five different things.
 
-OTHER THINGS TO WEIGH
+WEIGHING WHAT YOU FIND
 
 - Not every strong correlation is a finding. Some are too self-evident to deserve attention even
   when nothing derives one column from the other.
-- detect_outliers tells you THAT some rows are extreme. It does not tell you what they are. Use
-  group_compare to find which segment or period they belong to before drawing any conclusion from
-  them. Consider whether an effect that shows up everywhere at once is really an anomaly.
-- Quote a number with the denominator the toolkit actually used. Ratios are named in full -
-  "highest_over_lowest_ratio" is highest over lowest, "median_ratio_to_overall_median" is against
-  the median. Do not restate one of them against a different baseline.
+- Quote a ratio against the denominator its key names: "highest_over_lowest_ratio" is highest over
+  lowest, "median_ratio_to_overall_median" is against the median. Never restate one against another
+  baseline.
 - Keep what you measured separate from what you are inferring. You cannot test causation here.
+
 
 WHEN A CALL IS REJECTED
 
-Rejections are normal and informative: the error names the columns that WOULD have worked, or the
-values the argument accepts. Read it and issue a corrected call. Never repeat a rejected call
-unchanged, and never abandon a question because the first attempt was refused. Rejections are
-charged against your budget, so read the message rather than guessing again.
+Rejections are informative: the error names the columns that would have worked, or the values the
+argument accepts. Read it and correct the call rather than guessing again - rejections cost budget.
+Never repeat a rejected call unchanged, and never abandon a question because one attempt failed.
+A call you have already completed is refused as a duplicate: the answer is in the ledger above, and
+asking again cannot change it, because the data does not change between calls.
 
 WHAT THIS TOOLKIT CANNOT DO
 
@@ -205,7 +213,7 @@ it. Record it under "Not investigable with this toolkit" with what you would hav
 
 BUDGET
 
-Every tool result tells you how many calls remain. When it is nearly gone, stop and write up.
+Every tool result says how many calls remain. When it is nearly gone, stop and write up.
 
 YOUR FINAL ANSWER
 
@@ -214,15 +222,14 @@ When you are finished, reply with no tool calls, using exactly these headings:
 ## Findings
 Numbered, most important first, ONE distinct signal per entry - corroborating evidence from other
 columns belongs inside the entry it supports, never as an entry of its own. For each: what you
-found, the specific numbers supporting it, every stratification you ran on that pair including any
-that undermined it, how confident you are, and any caveat a reader needs. Where stratification
-changed your reading of a relationship, say so explicitly. For every stratification you name, quote
-the sign_reversal and attenuated values the toolkit returned - do not restate them from your own
-reading of the subgroup numbers.
+found, the numbers supporting it, every stratification you ran on that pair including any that
+undermined it, your confidence, and any caveat a reader needs. Say so explicitly where a
+stratification changed your reading. Quote the sign_reversal and attenuated values the toolkit
+returned for each stratification you name; do not restate them from the subgroup numbers.
 
 ## Checked and not reported
-What you actually investigated that did not earn a place in the findings, one line each on why.
-List only calls you really made.
+What you investigated that did not earn a place in the findings, one line each on why. Only calls
+you really made.
 
 ## Not investigable with this toolkit
 Questions this file raises that the five functions cannot answer. Omit if empty."""
@@ -240,6 +247,8 @@ class ToolInvocation:
     data: dict[str, Any] | None = None
     error: str | None = None
     error_code: str | None = None
+    # Canonical identity of the call, from the executor. Empty when the call never reached it.
+    signature: str = ""
 
 
 @dataclass(frozen=True)
@@ -291,11 +300,17 @@ class PlannerRun:
 
 
 def build_task_prompt(profile: dict[str, Any], focus: str | None, max_calls: int,
-                      tools: list[dict[str, Any]]) -> str:
+                      tools: list[dict[str, Any]], include_toolkit: bool = True) -> str:
     """The user turn: the profile as upfront context, plus the budget and any focus nudge.
 
     The profile is handed over rather than fetched. Making the agent spend a tool call to learn its
     own schema would be a round trip to discover something already known at load time.
+
+    `include_toolkit` writes out the function list in prose. The planning turn needs it — it is
+    given no schemas, and without this it plans against a remembered toolkit. Every later turn is
+    given the real schemas, so carrying the prose copy as well would pay for the same information
+    twice, every turn, out of a context floor that cannot be trimmed. So the loop asks for it once
+    and then swaps it out.
     """
     lines = [
         "Here is the file. Its schema profile is already loaded and is given to you in full below;",
@@ -326,11 +341,55 @@ def build_task_prompt(profile: dict[str, Any], focus: str | None, max_calls: int
             "manufacturing a finding to fit it.",
         ]
 
-    lines += [
-        "",
-        "First, write your plan. You have no tools on this turn - think about what is worth "
-        "investigating in this specific file, and say so. The toolkit is handed to you next turn.",
-    ]
+    if include_toolkit:
+        lines += [
+            "",
+            "THE TOOLKIT - these functions and nothing else. '?' marks an optional argument; every "
+            "column argument is checked against the profile above, and a rejection names what "
+            "would have worked:",
+            "",
+            format_toolkit(tools, [column["name"] for column in profile["columns"]]),
+            "",
+            "Plan with all of them, not just the most familiar. An outlier localised to a segment, "
+            "or one group far outside the rest, is as much a finding as a correlation.",
+            "",
+            "First, write your plan. You cannot call anything on this turn - think about what is "
+            "worth investigating in this file, and say so. The functions become callable next turn.",
+        ]
+    return "\n".join(lines)
+
+
+def format_toolkit(tools: list[dict[str, Any]],
+                   column_names: list[str] | None = None) -> str:
+    """Render the tool schemas as prose for the planning turn, which is given no schemas of its own.
+
+    The plan turn deliberately runs with `tools=None` — a model handed tools answers with tool calls
+    and empty content, and the plan, the most readable part of a trace, never gets written. But it
+    was also being given no *description* of the toolkit, so it planned against a remembered one. A
+    graded run's planning reasoning read: "We have only five functions ... maybe others? Not listed
+    but typical toolkit includes ... But we assume these." It never used the two it failed to guess.
+
+    Rendered from `to_openai_tools(profile)` rather than written out by hand, so it cannot drift from
+    what is actually offered, and so a parameter dropped for this file disappears from here too.
+    """
+    columns = set(column_names or ())
+    lines = []
+    for schema in tools:
+        function = schema["function"]
+        parameters = function["parameters"]
+        required = set(parameters.get("required", []))
+        rendered = []
+        for name, spec in parameters["properties"].items():
+            choices = spec.get("enum") or []
+            # Column enums are omitted: the profile above already lists every column with its role,
+            # and repeating five column lists here costs more context than the plan turn is worth.
+            # Enums that are NOT columns — like the outlier method — appear nowhere else, so they do.
+            allowed = "" if not choices or set(choices) <= columns else f"={'|'.join(map(str, choices))}"
+            rendered.append(f"{name}{'' if name in required else '?'}{allowed}")
+        # First sentence only. The full schemas, descriptions included, arrive next turn; this
+        # listing exists so the plan knows what EXISTS, not to restate the whole contract.
+        summary = function["description"].split(". ")[0].rstrip(".")
+        lines.append(f"- {function['name']}({', '.join(rendered)})\n    {summary}.")
     return "\n".join(lines)
 
 
@@ -367,9 +426,15 @@ def run_planner(
     schema_overhead = len(json.dumps(tools)) // CHARS_PER_TOKEN
 
     system_prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
+    # Two versions of the same message. The plan turn is offered no schemas, so it gets the toolkit
+    # written out; every turn after that is given the real schemas and would otherwise pay for the
+    # same list twice, forever, out of a floor that cannot be trimmed. The second version replaces
+    # the first as soon as the plan is written.
     task_prompt = build_task_prompt(profile, focus, max_calls, tools)
-    # Before spending a single request: does anything fit alongside the fixed overhead?
-    check_context_headroom(context_floor(system_prompt, task_prompt, tools), context_budget)
+    working_prompt = build_task_prompt(profile, focus, max_calls, tools, include_toolkit=False)
+    # Before spending a single request: does anything fit alongside the fixed overhead? Measured on
+    # the *working* prompt, since that is the one re-sent on every turn.
+    check_context_headroom(context_floor(system_prompt, working_prompt, tools), context_budget)
 
     run = PlannerRun(
         source=profile["source"],
@@ -408,6 +473,8 @@ def run_planner(
         run.turns.append(_turn(1, plan, (), kind="plan"))
         emit("plan", plan)
         first_index = 2
+        # The written-out toolkit has done its job; the real schemas take over from here.
+        run.messages[1] = {"role": "user", "content": working_prompt}
 
     protected = len(run.messages)
 
@@ -530,6 +597,9 @@ def _run_tool_calls(
                     data=result.data,
                     error=result.error,
                     error_code=result.error_code,
+                    # The executor's own canonical signature, not one re-derived here: the ledger and
+                    # the duplicate guard must agree about what counts as the same call.
+                    signature=result.signature,
                 )
 
         invocations.append(invocation)
@@ -569,11 +639,17 @@ def record_calls(run: PlannerRun, invocations: Sequence[ToolInvocation]) -> None
     agent can see that it is asking again instead of advancing.
     """
     for invocation in invocations:
-        signature = _signature(invocation.function, invocation.arguments)
+        signature = invocation.signature or call_signature(invocation.function,
+                                                           invocation.arguments)
         headline = _headline(invocation)
-        for position, (existing, _) in enumerate(run.ledger):
+        for position, (existing, kept) in enumerate(run.ledger):
             if existing == signature:
-                run.ledger[position] = (signature, headline)
+                # A repeat is now refused by the executor, so its headline reads "refused:
+                # DUPLICATE_CALL". Writing that over the entry would erase the answer the ledger
+                # exists to preserve — the agent would be told it already ran the call and shown
+                # nothing it could use. A failure never overwrites a success.
+                if invocation.ok or not kept.startswith("refused"):
+                    run.ledger[position] = (signature, headline if invocation.ok else kept)
                 run.repeats[signature] = run.repeats.get(signature, 1) + 1
                 break
         else:
@@ -595,11 +671,6 @@ def render_ledger(entries: list[tuple[str, str]],
                  f"and each attempt cost a call]") if asked > 1 else ""
         lines.append(f"{index}. {signature} -> {headline}{again}")
     return LEDGER_HEADER + "\n\n" + "\n".join(lines)
-
-
-def _signature(function: str, arguments: dict[str, Any]) -> str:
-    rendered = ", ".join(f"{key}={value!r}" for key, value in sorted(arguments.items()))
-    return f"{function}({rendered})"
 
 
 def _estimate_tokens(messages: list[dict[str, Any]], overhead: int = 0) -> int:

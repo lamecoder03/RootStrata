@@ -529,7 +529,10 @@ def test_every_fixture_leaves_room_for_results_after_the_fixed_overhead(loaded, 
     _, profile = loaded[dataset]
     tools = tools_for_profile(profile)
     system_prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
-    floor = context_floor(system_prompt, build_task_prompt(profile, None, 12, tools), tools)
+    # The working prompt, not the plan-turn one: the plan turn's written-out toolkit is sent once
+    # and swapped out, so it is not part of the floor every later request has to carry.
+    working = build_task_prompt(profile, None, 12, tools, include_toolkit=False)
+    floor = context_floor(system_prompt, working, tools)
 
     assert check_context_headroom(floor) >= MIN_RESULT_HEADROOM
 
@@ -629,3 +632,170 @@ def test_an_aborted_run_does_not_spend_a_doomed_write_up_call(training_kit):
 
     # plan, one acting turn, one failed attempt -- and no extra write-up attempt after that
     assert model.calls == 3
+
+
+# --- the planning turn is told what the toolkit actually is --------------------------------------
+
+def test_the_plan_turn_is_given_the_real_function_list(training_kit):
+    """Regression: the plan turn is offered no schemas, and was given no description of the toolkit
+    either, so it planned against a remembered one. A graded run's planning reasoning read: "We have
+    only five functions ... maybe others? Not listed but typical toolkit includes ... But we assume
+    these." It never called the two it failed to guess."""
+    kit = training_kit()
+    model = ScriptedModel([say(PLAN), say("## Findings\nDone.")])
+    run_planner(kit, model, model_name="stub")
+
+    plan_request = "\n".join(str(m.get("content", "")) for m in model.seen[0])
+    for function in ("get_summary_stats", "compute_correlation", "detect_outliers",
+                     "group_compare", "value_counts"):
+        assert function in plan_request
+    assert model.tool_schemas[0] is None          # still no callable tools on the plan turn
+
+
+def test_the_function_list_is_rendered_from_the_schemas_not_written_out(training_kit):
+    """Derived from to_openai_tools(profile), so it cannot drift from what is actually offered and
+    a tool dropped for this file disappears from the listing too."""
+    from agent.planner_loop import format_toolkit
+
+    kit = training_kit()
+    tools = [t for t in tools_for_profile(kit.profile)
+             if t["function"]["name"] != "detect_outliers"]
+    rendered = format_toolkit(tools, [c["name"] for c in kit.profile["columns"]])
+
+    assert "detect_outliers" not in rendered
+    assert "group_compare(group_col, value_col)" in rendered
+    assert "group_by?" in rendered                     # optional arguments are marked
+    assert "method?=zscore|iqr" not in rendered        # that tool was dropped, so neither is its enum
+
+
+def test_a_non_column_enum_is_spelled_out_but_column_enums_are_not(training_kit):
+    """Column lists are already in the profile directly above; repeating five of them costs more
+    context than the plan turn is worth. `method` appears nowhere else, so it is written out."""
+    from agent.planner_loop import format_toolkit
+
+    kit = training_kit()
+    tools = tools_for_profile(kit.profile)
+    rendered = format_toolkit(tools, [c["name"] for c in kit.profile["columns"]])
+
+    assert "method?=zscore|iqr" in rendered
+    assert "output_points" not in rendered             # no column enum is repeated here
+
+
+def test_the_function_list_is_dropped_once_the_real_schemas_arrive(training_kit):
+    """It is needed for one request. Carrying it afterwards pays twice for the same information,
+    every turn, out of a context floor that trimming is not allowed to touch."""
+    kit = training_kit()
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("get_summary_stats", {"column": "output_points"})),
+        say("## Findings\nDone."),
+    ])
+    run_planner(kit, model, model_name="stub")
+
+    plan_request = model.seen[0][1]["content"]
+    later_request = model.seen[-1][1]["content"]
+
+    assert "THE TOOLKIT" in plan_request
+    assert "THE TOOLKIT" not in later_request
+    assert "DATASET:" in later_request                 # the profile itself stays
+    assert model.tool_schemas[-1] is not None          # because the real schemas are there instead
+
+
+def test_the_prompt_gives_the_other_functions_real_coverage():
+    """The system prompt was 34 lines about correlation and 4 about everything else, and never
+    named two of the five functions. The agent called neither of them in any Day 5 run."""
+    from agent.planner_loop import SYSTEM_PROMPT, TOOLKIT_LIMITATIONS
+
+    prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
+    for function in ("get_summary_stats", "value_counts", "group_compare", "detect_outliers"):
+        assert function in prompt, f"{function} is never named in the system prompt"
+
+    # Measured by section rather than by keyword, which is what "coverage" actually means.
+    sections = dict(_sections(prompt))
+    correlation = sum(len(sections[name]) for name in sections if name in (
+        "STRATIFY BEFORE YOU CONCLUDE",
+        "AN UNUSUALLY HIGH CORRELATION IS A SUSPECT, NOT A HEADLINE",
+        "QUOTE THE FLAGS, NEVER RECOMPUTE THEM"))
+    others = len(sections["THE OTHER FOUR FUNCTIONS ARE NOT A SIDESHOW"])
+
+    assert others > 0
+    # Correlation still leads - it has the most ways to mislead you - but not by 8x, which is where
+    # this started (34 lines against 4, with two of the five functions never named at all).
+    assert correlation / others < 4, f"correlation {correlation} lines vs other tools {others}"
+
+
+def _sections(prompt: str) -> list[tuple[str, list[str]]]:
+    """Split the system prompt on its ALL-CAPS headings."""
+    import re
+
+    found: list[tuple[str, list[str]]] = []
+    for line in prompt.splitlines():
+        if re.fullmatch(r"[A-Z][A-Z ,\-'\"0-9]{8,}", line.strip()):
+            found.append((line.strip(), []))
+        elif found and line.strip():
+            found[-1][1].append(line)
+    return found
+
+
+# --- the duplicate guard, seen from the loop -----------------------------------------------------
+
+def test_a_repeated_call_comes_back_as_a_rejection_the_model_can_read(training_kit):
+    """The refusal reaches the model through the same path as any other rejection, so the existing
+    self-correction machinery carries it without a special case."""
+    kit = training_kit(max_calls=10)
+    same = {"column": "output_points"}
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("get_summary_stats", same, "c1")),
+        say("b", call("get_summary_stats", same, "c2")),
+        say("## Findings\nDone."),
+    ])
+    run = run_planner(kit, model, model_name="stub")
+
+    repeat = run.turns[2].invocations[0]
+    assert repeat.ok is False
+    assert repeat.error_code == "DUPLICATE_CALL"
+
+    tool_messages = [m for m in model.seen[-1] if m["role"] == "tool"]
+    fed_back = json.loads(tool_messages[-1]["content"])          # the reply to the repeat
+    assert fed_back["ok"] is False
+    assert "already run" in fed_back["error"]
+
+
+def test_a_refused_duplicate_does_not_erase_the_answer_in_the_ledger(training_kit):
+    """The repeat's headline is "refused: DUPLICATE_CALL". Writing that over the entry would leave
+    the agent told it already ran the call and shown nothing it could use."""
+    from agent.planner_loop import render_ledger
+
+    kit = training_kit(max_calls=10)
+    same = {"column": "output_points"}
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("get_summary_stats", same, "c1")),
+        say("b", call("get_summary_stats", same, "c2")),
+        say("## Findings\nDone."),
+    ])
+    run = run_planner(kit, model, model_name="stub")
+
+    assert len(run.ledger) == 1
+    signature, headline = run.ledger[0]
+    assert "mean=" in headline and "refused" not in headline
+    assert "ALREADY REQUESTED 2 TIMES" in render_ledger(run.ledger, run.repeats)
+
+
+def test_the_ledger_and_the_executor_agree_on_what_one_call_is(training_kit):
+    """Two spellings of the same call must not become two ledger entries either - the ledger takes
+    the executor's own signature rather than deriving a second opinion from the raw request."""
+    kit = training_kit(max_calls=10)
+    pair = {"col_a": "tenure_months", "col_b": "output_points"}
+    model = ScriptedModel([
+        say(PLAN),
+        say("a", call("compute_correlation", pair, "c1")),
+        say("b", call("compute_correlation", {**pair, "group_by": None}, "c2")),
+        say("## Findings\nDone."),
+    ])
+    run = run_planner(kit, model, model_name="stub")
+
+    assert len(run.ledger) == 1
+    assert run.repeats[run.ledger[0][0]] == 2
+    assert run.turns[2].invocations[0].error_code == "DUPLICATE_CALL"

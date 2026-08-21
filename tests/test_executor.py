@@ -172,3 +172,98 @@ def test_an_unstratified_correlation_logs_neither_flag(make_toolkit):
     assert "sign_reversal" not in summary
     assert "attenuated" not in summary
     assert "pearson_r" in summary
+
+
+# --- a completed call is refused, not re-run -----------------------------------------------------
+
+def test_an_identical_completed_call_is_refused_before_it_reaches_pandas(make_toolkit):
+    """Regression from the Day 5 store_monthly_sales run: the agent issued the same
+    compute_correlation four times with a ledger in front of it saying so in capitals. Annotation
+    is advice; the executor is the only layer that can decline."""
+    from guardrails.executor import DUPLICATE_CALL
+
+    kit = make_toolkit("training", max_calls=10)
+    arguments = {"col_a": "weekly_training_hours", "col_b": "output_points"}
+
+    first = kit.call("compute_correlation", arguments)
+    second = kit.call("compute_correlation", arguments)
+
+    assert first.ok is True
+    assert second.ok is False
+    assert second.error_code == DUPLICATE_CALL
+    assert second.data is None                       # it never ran
+    assert "already run" in second.error
+
+
+def test_the_refusal_hands_back_the_answer_it_already_has(make_toolkit):
+    """A refusal that just says no wastes the call twice. It quotes the earlier result."""
+    kit = make_toolkit("training", max_calls=10)
+    kit.call("get_summary_stats", {"column": "output_points"})
+
+    repeat = kit.call("get_summary_stats", {"column": "output_points"})
+    assert "n=" in repeat.error or "n_rows=" in repeat.error
+    assert "Use the result you already have" in repeat.error
+
+
+def test_a_duplicate_still_costs_a_call(make_toolkit):
+    """Consistent with rejected calls being charged: if refusing were free, an agent stuck in a
+    repeat could loop until the turn ceiling instead of terminating at its budget."""
+    kit = make_toolkit("training", max_calls=10)
+    kit.call("get_summary_stats", {"column": "output_points"})
+    kit.call("get_summary_stats", {"column": "output_points"})
+
+    assert kit.cap.used == 2
+    assert kit.audit.counts_by_outcome()["allowed"] == 1
+    assert kit.audit.counts_by_outcome()["rejected"] == 1
+
+
+def test_two_spellings_of_one_call_are_the_same_call(make_toolkit):
+    """The signature is built from the validator's normalised arguments, so an explicitly-null
+    optional argument and an omitted one are one call, not two."""
+    kit = make_toolkit("training", max_calls=10)
+
+    first = kit.call("compute_correlation",
+                     {"col_a": "tenure_months", "col_b": "output_points"})
+    second = kit.call("compute_correlation",
+                      {"col_a": "tenure_months", "col_b": "output_points", "group_by": None})
+
+    assert first.ok is True
+    assert second.ok is False
+    assert first.signature == second.signature
+
+
+def test_a_different_grouping_is_a_different_call(make_toolkit):
+    """The guard must never block genuine progress: adding group_by asks a new question."""
+    kit = make_toolkit("training", max_calls=10)
+    pair = {"col_a": "weekly_training_hours", "col_b": "output_points"}
+
+    assert kit.call("compute_correlation", pair).ok is True
+    assert kit.call("compute_correlation", {**pair, "group_by": "role_tier"}).ok is True
+    assert kit.call("compute_correlation", {**pair, "group_by": "region"}).ok is True
+
+
+def test_a_repeated_invalid_call_keeps_its_own_rejection(make_toolkit):
+    """A rejected call never completed, so it is not a duplicate. Its own error names the columns
+    that would have worked, and that message is the whole self-correction mechanism."""
+    kit = make_toolkit("training", max_calls=10)
+    bad = {"group_col": "employee_id", "value_col": "output_points"}
+
+    first = kit.call("group_compare", bad)
+    second = kit.call("group_compare", bad)
+
+    assert first.error_code == second.error_code == "WRONG_COLUMN_ROLE"
+    assert "role_tier" in second.error          # still the useful message, not "duplicate"
+
+
+def test_the_duplicate_refusal_is_written_to_the_audit_log(make_toolkit):
+    """Every attempt is recorded, refusals included - that is what makes the log a faithful record
+    of what the agent tried rather than of what it was allowed to do."""
+    kit = make_toolkit("training", max_calls=10)
+    kit.call("value_counts", {"column": "role_tier"})
+    kit.call("value_counts", {"column": "role_tier"})
+
+    entries = kit.audit.entries
+    assert len(entries) == 2
+    assert entries[0].outcome == "allowed"
+    assert entries[1].outcome == "rejected"
+    assert "already run" in entries[1].detail
