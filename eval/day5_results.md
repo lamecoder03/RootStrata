@@ -12,10 +12,12 @@ round, which the rules were derived from, is preserved unchanged in `graded/day4
 |---|---|---|---|
 | `training_productivity` — the trap | **PASS** | never graded | **first pass ever recorded** |
 | `marketing_weekly` | **PARTIAL** | FAIL | **recovered, not fixed** |
-| `store_monthly_sales` | not gradeable (aborted at 11 calls) | not gradeable | unchanged |
+| `store_monthly_sales` | **PARTIAL** (re-run alone, see below) | not gradeable | **first verdict in three rounds** |
 
-Two of three completed. `store_monthly_sales` again ran out of daily quota before writing up — the
-third run in a batch is consistently the one that dies, because a full run costs 65–70k of 200k.
+All three now have verdicts. `store_monthly_sales` needed a second attempt: its first, as the third
+run of a batch, died on quota at 11 calls. Re-run alone on a fresh key it completed 12/12 and wrote
+up. A full run costs 65–70k of the 200k daily budget, so three per day is the ceiling and the third
+is always at risk.
 
 ## Did the two rules work?
 
@@ -141,42 +143,86 @@ than one signal seen through three columns.
 
 ---
 
-## `store_monthly_sales.csv` — not gradeable, and heading for a fail
+## `store_monthly_sales.csv` — PARTIAL
 
-Aborted after 11 of 12 calls when the daily budget ran out, so no conclusions were written. But
-unlike Day 4, where the abort was the whole story, this run had already gone wrong:
+Its first attempt, as the third run of a batch, died on quota at 11 calls. Re-run **alone** on a
+fresh key it completed 12/12 and wrote up. This is the dataset's first verdict in three rounds.
 
-| # | call | note |
+**The rubric's partial clause describes what happened almost word for word.** *"Partial — finds an
+anomaly but misattributes it (e.g. blames the `North` region rather than the store)."* Finding 4:
+
+> **Revenue varies dramatically across regions.** East mean = $165,528 (highest), South mean =
+> $48,482 (lowest), highest/lowest ratio = 3.41 … indicating a strong geographic performance
+> disparity that warrants further business investigation (e.g. market size, product mix, pricing).
+
+STORE_07 sits in the East region. Its 24 extreme months are what lifts East's mean to 3.4× the other
+three, which sit within a few hundred dollars of each other — a tell the agent had in front of it and
+read as a regional story. It never ran `group_compare(store_id, revenue_usd)` and never ran
+`detect_outliers`, so STORE_07 is not named anywhere in the report. The anomaly was found, one level
+too coarse.
+
+It avoided the other two partial triggers and both fail triggers: the November bump is not reported
+at all, the same anomaly is not listed three times, and the pooled mean (77,867) is never presented
+as typical.
+
+**Rule 1 fired correctly here too**, on two different pairs:
+
+> The correlation is far above the 0.95 threshold where a near-perfect fit usually signals a derived
+> relationship (e.g. revenue = units × price) … this is a property of how the file was constructed,
+> not a substantive business insight.
+
+Both near-identities (`units_sold` × `revenue_usd` at 0.9986, `foot_traffic` × `units_sold` at
+0.9974) are correctly labelled construction artefacts rather than findings.
+
+### What actually cost it the pass: four calls spent on one question
+
+| # | call | |
 |---|---|---|
-| 1, 2, 4, 6 | `units_sold` × `revenue_usd`, then by region / store_id / promo_flag | r = 0.9986 — an identity, stratified three separate ways |
-| 3, **5**, **7** | `foot_traffic` × `units_sold`, ungrouped | **the identical call, three times** |
-| 8 | `promo_flag` × `units_sold` | r = 0.0072 |
-| 9, 11 | `returns_count` × `units_sold`, then by store_id | r = 0.9854 — another near-identity |
-| 10 | `foot_traffic` × `units_sold` by promo_flag | |
+| 1 | `compute_correlation(units_sold, revenue_usd)` | |
+| **2, 4, 6, 8** | **`compute_correlation(foot_traffic, units_sold)`** | **the identical call, four times** |
+| 3 | `compute_correlation(units_sold, revenue_usd, group_by=region)` | |
+| 5 | `compute_correlation(units_sold, revenue_usd, group_by=promo_flag)` | |
+| 7 | `compute_correlation(foot_traffic, units_sold, group_by=promo_flag)` | |
+| 9 | `group_compare(promo_flag, units_sold)` | reached group_compare at last |
+| 10 | `compute_correlation(promo_flag, revenue_usd)` | |
+| 11 | `group_compare(promo_flag, revenue_usd)` | |
+| 12 | `group_compare(region, revenue_usd)` | the call that produced finding 4 |
 
-**All eleven calls were `compute_correlation`.** No `group_compare`, no `detect_outliers`, no
-`get_summary_stats`, no `value_counts`. It never ran `group_compare(store_id, revenue_usd)` — the
-one call that localises STORE_07, which is the dataset's entire planted finding. On the criteria
-that is a `Fail — misses STORE_07 entirely`, and the abort is not what caused it.
+Four of twelve calls — a third of the budget — went to re-asking one question whose answer had not
+changed. `group_compare(store_id, revenue_usd)` costs one call and is the entire planted finding.
 
-### Two defects this exposes
+**Progress against the previous attempt:** it did reach `group_compare` this time (3 calls, versus
+zero last round when all 11 were `compute_correlation`). It grouped by `promo_flag` twice and
+`region` once, and never by `store_id`.
 
-**The ledger did not stop a repeated call.** Calls 3, 5 and 7 are byte-identical. The ledger was
-present and correct in the prompt each time — entry 3 read
-`compute_correlation(col_a='foot_traffic', col_b='units_sold') -> r=0.9974; n=276` — and the model
-issued it again anyway, twice. `run.ledger` is a `list[tuple[str, str]]`, so a repeat is appended as
-a *new numbered entry* rather than collapsing onto the one already there; the list grows and reads
-like progress. A structure keyed by call signature would make the repetition impossible to miss, and
-the executor could refuse a duplicate outright instead of charging a call for an answer it already
-holds. **Not fixed here**, deliberately: it is a real defect found in a graded run, and the fix
-belongs in a change that a *later* round grades.
+### The ledger fix works, and it did not change the behaviour
 
-**The derived-identity rule may have a cost.** Nine of eleven calls went to pairs above r = 0.98.
-The rule tells the agent that a very high correlation is a suspect requiring investigation, and on a
-file where four columns are mechanically linked, "investigate the suspects" consumed the budget
-before anything else was tried. The trap dataset shows the rule producing good judgment; this run
-raises the possibility that it also produces expensive curiosity. One run is not enough to claim
-that — it is a hypothesis for the next round, recorded now so it is not invented later.
+The dedupe shipped before this run, and it did exactly what it was built to do — 12 calls collapsed
+to 9 ledger entries, with the repeat counted and named:
+
+```
+2. compute_correlation(col_a='foot_traffic', col_b='units_sold') -> r=0.9974; n=276
+   [ALREADY REQUESTED 4 TIMES - the answer did not change, and each attempt cost a call]
+```
+
+That text was in front of the model, at the top of the conversation, on every turn. It repeated the
+call anyway — a fourth time after being told it had asked three times. The previous round's failure
+was blamed partly on the ledger's presentation; this round removes that explanation. **Making the
+repetition visible is not sufficient.** The remaining lever is enforcement rather than display: the
+executor already sees every call before it runs, and could return the stored result for an exact
+repeat, or refuse it the way it refuses an invalid column. That is a guardrail change, not a display
+change, and it is not made here.
+
+### A second defect this run exposed
+
+The audit log is opened in append mode by design — nothing written may be edited or dropped — but
+its **filename is keyed on the dataset, not the run**. Re-running the same CSV into the same
+directory silently concatenated both runs into one file: 11 entries from the aborted attempt
+followed by 12 from this one, 23 in total, with nothing marking the boundary. `generate_report.py`
+replays that file to rebuild its evidence table, so it would have reported a 23-call investigation
+that never happened. The two runs were separated by their 23-minute timestamp gap, and
+`_fresh_audit_path` now rotates an existing log aside — renamed by the timestamp of its last entry,
+never deleted — so one file is always one run.
 
 ---
 
@@ -188,21 +234,26 @@ that — it is a hypothesis for the next round, recorded now so it is not invent
 | `attenuated` logged in the audit summary | Day 4 | verified (Day 4) |
 | `attenuated` given equal weight to `sign_reversal` | Day 4 | backfired, then superseded by rule 2 |
 | Confidence follows the worst stratification | Day 4 | **verified here** — trap dataset, both pairs |
-| One signal is one finding | Day 4 | **still untested** — needs the store dataset |
-| Rule 1: high r is a suspect, check for derivation | Day 5 | **partly verified** — judgment yes, ranking no |
+| One signal is one finding | Day 4 | **untested still** — the store run reported four distinct signals, none duplicated, so nothing exercised it |
+| Rule 1: high r is a suspect, check for derivation | Day 5 | **partly verified** — correct on all four identities across two datasets; ranking still wrong on marketing |
 | Rule 2: quote the flags, never recompute | Day 5 | **verified** — 12 of 12 exact |
+| Ledger deduplicates by call signature | Day 5 | **works, and insufficient** — repeat collapsed and counted; the model repeated it anyway |
+| One audit log is one run (`_fresh_audit_path`) | Day 5 | new — found when two runs concatenated into one file |
 | `context_floor` / `check_context_headroom` | Day 5 | held: three runs, no over-budget request |
 | `DailyQuotaExhausted`, `preflight()` | Day 5 | held: the third run refused to start on 11 tokens |
 
 ## What is owed
 
-1. `store_monthly_sales` has now failed to produce a gradeable run three times. It needs a batch of
-   its own, run first rather than third.
-2. The ranking problem: the tautology is judged correctly and still printed first. That is a
-   *position* rule, and the prompt states it — the next change should address why stating it was not
-   enough.
-3. The ledger defect above, fixed and then graded by a round that follows the fix.
-4. `one signal is one finding` remains untested, for the third round running.
+1. **Enforcement, not display, for repeated calls.** The ledger now collapses and counts a repeat and
+   says so in capitals; the model still spent a third of its budget re-asking one question. The
+   executor is the only place that can actually stop it — return the stored result for an exact
+   repeat, or refuse it the way an invalid column is refused. Either changes what a guardrail does,
+   so it needs its own graded round.
+2. **The ranking problem on `marketing_weekly`.** The tautology is judged correctly and printed
+   first anyway. Stating "never as your leading finding" was not enough.
+3. **`store_monthly_sales` needs `group_compare(store_id, …)` to be reachable.** It is one call and
+   it is the whole planted finding. Two rounds running, the budget was gone before it was tried.
+4. **One signal is one finding** has still never been exercised, three rounds in.
 
 ## Reproducing this
 

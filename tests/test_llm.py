@@ -157,3 +157,47 @@ def test_preflight_tolerates_a_per_minute_limit(client):
     """A minute-scale limit says nothing about the day's budget, and the run's own retries clear it."""
     client._client = RecordingClient(rate_limit(TPM_BODY))
     client.preflight()          # must not raise
+
+
+# --- one audit log is one run -----------------------------------------------------------------
+
+def test_an_existing_audit_log_is_rotated_aside_not_appended_to(tmp_path):
+    """Regression: the audit path is keyed on the dataset, not the run, so re-running the same CSV
+    into the same directory concatenated two runs into one file. A graded store_monthly_sales log
+    held 23 entries from two runs, and anything replaying it reads a 23-call investigation."""
+    import json as _json
+    from agent.run import _fresh_audit_path
+
+    path = tmp_path / "store_monthly_sales_audit.jsonl"
+    path.write_text(_json.dumps({"timestamp": "2026-08-21T19:42:19.594+00:00",
+                                 "function": "compute_correlation"}) + "\n", encoding="utf-8")
+
+    returned = _fresh_audit_path(path)
+
+    assert returned == path
+    assert not path.exists()                                  # the new run starts on a clean file
+    archived = list(tmp_path.glob("store_monthly_sales_audit.*.jsonl"))
+    assert len(archived) == 1                                 # and the old run was kept, not deleted
+    assert "20260821T1942" in archived[0].name
+    assert "compute_correlation" in archived[0].read_text(encoding="utf-8")
+
+
+def test_rotating_twice_does_not_overwrite_the_first_archive(tmp_path):
+    import json as _json
+    from agent.run import _fresh_audit_path
+
+    path = tmp_path / "d_audit.jsonl"
+    entry = _json.dumps({"timestamp": "2026-08-21T19:42:19.594+00:00"}) + "\n"
+    for _ in range(2):
+        path.write_text(entry, encoding="utf-8")
+        _fresh_audit_path(path)
+
+    assert len(list(tmp_path.glob("d_audit.*.jsonl"))) == 2
+
+
+def test_a_missing_audit_log_is_left_alone(tmp_path):
+    from agent.run import _fresh_audit_path
+
+    path = tmp_path / "new_audit.jsonl"
+    assert _fresh_audit_path(path) == path
+    assert not list(tmp_path.iterdir())

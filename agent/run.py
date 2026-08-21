@@ -8,6 +8,7 @@ terminal while it runs, so a long run is watchable rather than a silent wait for
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -75,6 +76,40 @@ def make_reporter(quiet: bool):
     return report
 
 
+def _fresh_audit_path(path: Path) -> Path:
+    """Return `path`, first moving any existing audit log aside so one file is always one run.
+
+    The audit log is opened in append mode on purpose — nothing already written may be edited or
+    dropped. But the filename is keyed on the dataset, not the run, so re-running the same CSV into
+    the same directory silently concatenated two runs into one file. That happened: a graded
+    `store_monthly_sales` log held 23 entries from two separate runs, and anything replaying it — the
+    report generator included — would have read them as a single 23-call investigation.
+
+    Rotating rather than truncating keeps the append-only guarantee intact. The old run is renamed
+    with the timestamp of its last entry, so it stays inspectable and cannot be confused for this one.
+    """
+    if not path.exists():
+        return path
+
+    stamp = "previous"
+    try:
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if lines:
+            last = json.loads(lines[-1]).get("timestamp", "")
+            stamp = last.replace(":", "").replace("-", "").replace(".", "")[:15] or "previous"
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass                      # an unreadable old log is still worth keeping, just less precisely
+
+    archived = path.with_name(f"{path.stem}.{stamp}{path.suffix}")
+    suffix = 2
+    while archived.exists():
+        archived = path.with_name(f"{path.stem}.{stamp}-{suffix}{path.suffix}")
+        suffix += 1
+    path.rename(archived)
+    print(f"note: an audit log already existed here; kept it as {archived.name}")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m agent.run",
@@ -140,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
 
     toolkit = GuardedToolkit.from_csv(
         csv_path,
-        audit_log=AuditLog(trace_dir / f"{stem}_audit.jsonl"),
+        audit_log=AuditLog(_fresh_audit_path(trace_dir / f"{stem}_audit.jsonl")),
         max_calls=args.max_calls,
     )
 
