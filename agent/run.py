@@ -62,6 +62,9 @@ def make_reporter(quiet: bool):
                 print(_wrap(payload.error or "", "      "))
             elif payload.function == "compute_correlation" and payload.data.get("group_by"):
                 print(_wrap(payload.data["stratification_summary"], "      "))
+        elif event == "aborted":
+            print(f"\n[run aborted] {payload}")
+            print("[the trace will still be written from everything gathered so far]")
         elif event == "wrapping_up":
             print(f"\n[{payload}] asking for a final write-up with no tools available")
         elif event == "finished":
@@ -154,9 +157,11 @@ def main(argv: list[str] | None = None) -> int:
           f"calls: {run.cap.used}/{run.cap.limit} "
           f"({counts['allowed']} ran, {counts['rejected']} refused)   "
           f"tokens: {run.total_tokens:,}")
+    if run.error:
+        print(f" ABORTED: {run.error}")
     for label, path in paths.items():
         print(f" {label:<9} {path}")
-    return 0
+    return 1 if run.error else 0
 
 
 if __name__ == "__main__":

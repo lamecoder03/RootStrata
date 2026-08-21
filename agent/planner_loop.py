@@ -195,6 +195,9 @@ class PlannerRun:
     messages: list[dict[str, Any]] = field(default_factory=list)
     findings: str = ""
     stop_reason: str = ""
+    # Set when a model call failed and ended the run early. The trace reports it rather than
+    # pretending the agent chose to stop.
+    error: str | None = None
     # (call signature, headline result) for every call made, in order. Never trimmed: this is what
     # stops the agent re-running work whose full result has since been compacted out of the window.
     ledger: list[tuple[str, str]] = field(default_factory=list)
@@ -316,7 +319,9 @@ def run_planner(
 
     first_index = 1
     if plan_first:
-        plan = model.complete(run.messages, tools=None)
+        plan = _safe_complete(model, run.messages, None, run)
+        if plan is None:
+            return run
         run.messages.append(assistant_message(plan))
         run.messages.append({"role": "user", "content": BEGIN_PROMPT})
         run.turns.append(_turn(1, plan, (), kind="plan"))
@@ -329,7 +334,10 @@ def run_planner(
         run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
         run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
                                        protected=protected)
-        response = model.complete(run.messages, tools=tools)
+        response = _safe_complete(model, run.messages, tools, run)
+        if response is None:
+            emit("aborted", run.error)
+            break
         run.messages.append(assistant_message(response))
 
         if not response.tool_calls:
@@ -354,17 +362,54 @@ def run_planner(
     else:
         run.stop_reason = "turn limit reached"
 
-    if run.stop_reason != "model finished":
+    # A run that ended because the API died has no working API to write its findings with, so it
+    # skips the write-up rather than spending a doomed request. The trace still gets written.
+    if run.stop_reason != "model finished" and run.error is None:
         emit("wrapping_up", run.stop_reason)
         run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
         run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
                                        protected=protected)
-        writeup = _forced_writeup(model, run.messages, run.stop_reason)
-        run.turns.append(_turn(len(run.turns) + 1, writeup, (), kind="writeup"))
-        run.findings = writeup.content
-        emit("finished", run.findings)
+        writeup = _safe_complete(model, run.messages, None, run, writeup_for=run.stop_reason)
+        if writeup is not None:
+            run.turns.append(_turn(len(run.turns) + 1, writeup, (), kind="writeup"))
+            run.findings = writeup.content
+            emit("finished", run.findings)
 
     return run
+
+
+def _safe_complete(
+    model: ChatModel,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    run: PlannerRun,
+    writeup_for: str | None = None,
+) -> LLMResponse | None:
+    """One model call that records its own failure instead of raising through the loop.
+
+    A run that dies on an API error still has everything before that point worth keeping - the plan,
+    the calls, the flags it saw. Letting the exception escape would throw all of it away before the
+    trace is written, which is exactly what a trace exists to prevent. Returning None means "stop,
+    but keep what you have"; run.error carries the reason so the trace can say what happened.
+    """
+    if writeup_for is not None:
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Stop investigating now: {writeup_for}. Write your final answer from the evidence "
+                "you already have, using the required headings. Do not request any more tool calls. "
+                "Say plainly which questions you had to leave open because the run ended early."
+            ),
+        })
+    try:
+        response = model.complete(messages, tools=tools)
+    except Exception as exc:                          # noqa: BLE001 - any failure ends the run
+        run.error = f"{type(exc).__name__}: {exc}"
+        run.stop_reason = "aborted: the model call failed"
+        return None
+    if writeup_for is not None:
+        messages.append(assistant_message(response))
+    return response
 
 
 def _run_tool_calls(
@@ -568,28 +613,6 @@ def _tool_payload(invocation: ToolInvocation) -> str:
         }
     payload["calls_remaining"] = invocation.calls_remaining
     return json.dumps(payload, default=str)
-
-
-def _forced_writeup(
-    model: ChatModel, messages: list[dict[str, Any]], stop_reason: str
-) -> LLMResponse:
-    """Ask for findings with no tools attached, so a run that hits a ceiling still reports.
-
-    A run that dies silently at its budget is worse than one that says what it had time to learn.
-    """
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                f"Stop investigating now: {stop_reason}. Write your final answer from the evidence "
-                "you already have, using the required headings. Do not request any more tool calls. "
-                "Say plainly which questions you had to leave open because the run ended early."
-            ),
-        }
-    )
-    response = model.complete(messages, tools=None)
-    messages.append(assistant_message(response))
-    return response
 
 
 def _turn(index: int, response: LLMResponse, invocations: tuple[ToolInvocation, ...],

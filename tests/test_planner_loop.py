@@ -408,3 +408,82 @@ def test_trimming_compacts_old_results_before_dropping_anything(training_kit):
     assert len(compacted) == len(run.messages)          # compaction only, nothing dropped yet
     assert any("payload compacted" in str(m.get("content")) for m in compacted)
     _assert_transcript_is_well_formed(compacted)
+
+
+# --- a dying API must not take the evidence with it ---------------------------------------------
+
+class FailingModel:
+    """Replays responses, then raises — standing in for the API dying mid-run."""
+
+    def __init__(self, responses: list[LLMResponse], error: Exception) -> None:
+        self._responses = list(responses)
+        self._error = error
+        self.calls = 0
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        if not self._responses:
+            raise self._error
+        return self._responses.pop(0)
+
+
+def test_an_api_failure_ends_the_run_but_keeps_everything_gathered(training_kit):
+    """The whole point of a trace is to survive this. Losing 10 good calls to a 429 is the bug."""
+    kit = training_kit(max_calls=10)
+    model = FailingModel(
+        [
+            say(PLAN),
+            say("Stratifying.", call("compute_correlation",
+                                     {"col_a": "weekly_training_hours", "col_b": "output_points",
+                                      "group_by": "role_tier"}, "c1")),
+        ],
+        RuntimeError("Groq call failed after 4 attempts: Error code: 429 - daily limit"),
+    )
+    run = run_planner(kit, model, model_name="stub")
+
+    assert run.error is not None
+    assert "429" in run.error
+    assert run.stop_reason == "aborted: the model call failed"
+
+    # everything before the failure survived
+    assert len(run.turns) == 2
+    assert run.turns[1].invocations[0].data["sign_reversal"] is True
+    assert len(run.ledger) == 1
+    assert run.cap.used == 1
+
+
+def test_the_trace_of_an_aborted_run_still_renders_and_says_why(training_kit):
+    kit = training_kit(max_calls=10)
+    model = FailingModel(
+        [say(PLAN), say("Working.", call("get_summary_stats", {"column": "output_points"}, "c1"))],
+        RuntimeError("Error code: 429 - tokens per day exhausted"),
+    )
+    run = run_planner(kit, model, model_name="stub")
+    trace = render_trace(run)
+
+    assert "aborted: the model call failed" in trace
+    assert "tokens per day exhausted" in trace
+    assert "cut short before the agent could write up" in trace
+    assert "get_summary_stats" in trace          # the evidence is still there
+    assert "## Audit log" in trace
+
+
+def test_a_failure_on_the_very_first_call_still_returns_a_run(training_kit):
+    kit = training_kit(max_calls=10)
+    run = run_planner(kit, FailingModel([], RuntimeError("dead on arrival")), model_name="stub")
+
+    assert run.error is not None
+    assert run.turns == []
+    assert render_trace(run)                     # renders rather than raising
+
+
+def test_an_aborted_run_does_not_spend_a_doomed_write_up_call(training_kit):
+    """No working API means no findings; burning another request on it helps nobody."""
+    kit = training_kit(max_calls=10)
+    model = FailingModel([say(PLAN), say("Working.", call("get_summary_stats",
+                                                          {"column": "output_points"}, "c1"))],
+                         RuntimeError("429"))
+    run_planner(kit, model, model_name="stub")
+
+    # plan, one acting turn, one failed attempt -- and no extra write-up attempt after that
+    assert model.calls == 3

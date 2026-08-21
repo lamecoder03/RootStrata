@@ -11,6 +11,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from dotenv import load_dotenv
@@ -122,7 +123,10 @@ class GroqClient:
         temperature: float = DEFAULT_TEMPERATURE,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
     ) -> None:
-        load_dotenv()
+        # Explicit path, not load_dotenv()'s default: the no-argument form finds the .env by
+        # inspecting the caller's stack frame, which raises outright when this is imported from a
+        # REPL or a piped script. The repo root is two levels up from this file and never moves.
+        load_dotenv(Path(__file__).resolve().parent.parent / ".env")
         key = api_key or os.environ.get("GROQ_API_KEY")
         if not key:
             raise MissingCredentials(

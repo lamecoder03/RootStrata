@@ -59,6 +59,7 @@ def _header(run: PlannerRun) -> list[str]:
         f"| focus | {('`' + run.focus + '`') if run.focus else '_none (unfocused run)_'} |",
         f"| model | `{run.model_name}` |",
         f"| stop reason | **{run.stop_reason}** |",
+        *([f"| error | `{run.error}` |"] if run.error else []),
         f"| LLM turns | {len(run.turns)} |",
         f"| tool calls | {cap.used if cap else 0} of {cap.limit if cap else 0} budget |",
         f"| allowed / rejected | {counts.get('allowed', 0)} / "
@@ -202,6 +203,14 @@ def _summarise(function: str, data: dict[str, Any]) -> list[str]:
 
 
 def _findings(run: PlannerRun) -> list[str]:
+    if run.error and not run.findings.strip():
+        return [
+            "---", "", "## Final answer", "",
+            "**None — the run was cut short before the agent could write up.**", "",
+            f"`{run.error}`", "",
+            "The turns above are still the record of what it investigated and what the "
+            "stratification flags told it; only the write-up is missing.", "",
+        ]
     return ["---", "", "## Final answer", "",
             run.findings.strip() or "_(the model returned no findings text)_", ""]
 
