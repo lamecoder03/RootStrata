@@ -128,7 +128,10 @@ def _summarise(data: dict[str, Any]) -> str:
     if not isinstance(data, dict):
         return type(data).__name__
     headline = []
-    for key in ("n", "n_rows", "n_outliers", "n_groups_total", "n_distinct", "sign_reversal"):
+    # Both stratification flags, not just one: a reversal and an attenuation are different failures,
+    # and grading a run later means being able to see which one the agent was shown.
+    for key in ("n", "n_rows", "n_outliers", "n_groups_total", "n_distinct",
+                "sign_reversal", "attenuated"):
         if key in data:
             headline.append(f"{key}={data[key]}")
     if "overall" in data and isinstance(data["overall"], dict):
