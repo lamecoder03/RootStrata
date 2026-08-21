@@ -162,7 +162,11 @@ def main(argv: list[str] | None = None) -> int:
         context_budget=args.context_budget,
     )
 
-    paths = write_trace(run, trace_dir, stem)
+    # A run that died before its first turn has nothing to record, and writing it anyway drops a
+    # file named like a result into the folder grading reads from. Everything the attempt taught is
+    # in run.error, which is printed. A run with even one turn keeps its trace: losing ten good
+    # calls to a rate limit is the failure this whole path exists to prevent.
+    paths = write_trace(run, trace_dir, stem) if run.turns else {}
     counts = run.audit.counts_by_outcome()
     print(f"\n{'=' * WIDTH}")
     print(f" stopped: {run.stop_reason}   turns: {len(run.turns)}   "

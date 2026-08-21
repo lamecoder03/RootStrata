@@ -144,7 +144,7 @@ def test_preflight_pads_the_prompt_because_the_daily_gate_measures_the_prompt(cl
     prompt_chars = len(seen["messages"][0]["content"])
     assert prompt_chars // 4 >= PREFLIGHT_TOKENS * 0.8      # the prompt carries the weight
     assert seen["max_completion_tokens"] == 1               # and the reply costs nothing
-    assert PREFLIGHT_TOKENS >= 2000
+    assert PREFLIGHT_TOKENS >= 6000          # more than one real turn, which costs 3.2-5.7k
 
 
 def test_preflight_raises_on_a_daily_limit(client):

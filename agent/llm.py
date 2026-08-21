@@ -31,10 +31,11 @@ DEFAULT_REASONING_EFFORT = "medium"
 
 MAX_RETRIES = 4
 BACKOFF_SECONDS = 2.0
-# How big a prompt preflight() sends. Large enough to be refused when only a few hundred tokens
-# remain — the case that twice let a doomed batch start — and small enough that paying it on every
-# run is cheap: ~3% of a run's ~60k. It is a real cost, paid to avoid a much larger wasted one.
-PREFLIGHT_TOKENS = 2_000
+# How big a prompt preflight() sends. Measured, twice: real requests in a run cost 3,200-5,700
+# tokens, so the first value here (2,000) was under-sized — it passed, spent the 2,000 it had just
+# proved, and the run's actual first request was refused at turn 0 for 3,179. A probe spends
+# exactly what it proves, so it has to ask for more than one real turn, not less.
+PREFLIGHT_TOKENS = 6_000
 
 
 class MissingCredentials(RuntimeError):
@@ -165,8 +166,12 @@ class GroqClient:
 
         So the prompt itself is padded to the size of a real turn. The cost is honest: about
         `needed_tokens` when it passes, nothing when it fails, since a refused request is not
-        charged. And it answers a narrow question — whether ONE turn fits — not whether a whole run
-        will, which no probe can tell you.
+        charged.
+
+        Two limits are inherent and worth stating rather than papering over. It answers whether ONE
+        turn fits, not whether a whole run will — no probe can answer that without spending a run.
+        And it *spends what it proves*: passing means at least `needed_tokens` were free a moment
+        ago, and they are not free now. That is why the default asks for more than a single turn.
         """
         padding = "the quick brown fox jumps over the lazy dog. " * (needed_tokens // 10)
         try:
