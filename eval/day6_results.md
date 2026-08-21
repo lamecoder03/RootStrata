@@ -1,0 +1,178 @@
+# Day 6 — `store_monthly_sales` only
+
+One dataset, run alone on the Day 6 code (`c5d159e`). `marketing_weekly` and
+`training_productivity` were deliberately **not** re-run: quota allows roughly one more full run and
+it is being held in reserve. Their Day 5 verdicts stand and are not re-graded here.
+
+Trace: [`reports/traces/graded/day6/`](../reports/traces/graded/day6/). 12/12 calls, 14 turns,
+68,881 tokens, model finished and wrote up.
+
+## Verdict: PASS
+
+Graded against [`ground_truth.md`](ground_truth.md):
+
+> **Pass** — identifies `STORE_07` as an outlier segment with a magnitude (~8x), and either omits
+> the November bump or labels it seasonality.
+
+Finding 1, verbatim:
+
+> **Revenue varies dramatically by store** – STORE 07's average monthly revenue ($398,295) is
+> **8.32×** higher than the lowest-earning store (STORE 05, $47,894).
+
+Checked against the toolkit directly: `highest STORE_07 398295, lowest STORE_05 47894, ratio 8.32`.
+Exact. The November bump is not mentioned anywhere, and the pooled mean (77,867) is never presented
+as typical, so neither fail condition is triggered.
+
+**The denominator is right, too.** It says "8.32× higher than the lowest-earning store", which is
+what `highest_over_lowest_ratio` actually measures. The Day 3 bug — reading that same 8.32 as "8.3×
+the overall mean" — does not recur.
+
+| Day 3 | Day 4 | Day 5 | Day 6 |
+|---|---|---|---|
+| not graded (diagnostic) | aborted, not gradeable | **PARTIAL** — blamed the East region | **PASS** — names STORE_07 at 8.32× |
+
+---
+
+## The three questions
+
+### 1. Did it call `group_compare(store_id, revenue_usd)`, and early enough?
+
+**It called it. It was call 12 of 12 — the last one it had.**
+
+| # | call | |
+|---|---|---|
+| 1 | `compute_correlation(revenue_usd, units_sold)` | |
+| 2 | `compute_correlation(foot_traffic, units_sold)` | |
+| 3 | `compute_correlation(revenue_usd, units_sold, group_by=store_id)` | |
+| **4** | `compute_correlation(foot_traffic, units_sold)` | **REFUSED — DUPLICATE_CALL** |
+| 5 | `group_compare(promo_flag, revenue_usd)` | |
+| 6 | `compute_correlation(foot_traffic, units_sold, group_by=store_id)` | |
+| 7 | `compute_correlation(revenue_usd, units_sold, group_by=region)` | |
+| 8 | `compute_correlation(foot_traffic, units_sold, group_by=region)` | |
+| 9 | `group_compare(region, revenue_usd)` | |
+| 10 | `group_compare(promo_flag, units_sold)` | |
+| 11 | `detect_outliers(revenue_usd, iqr)` | 34 outliers |
+| **12** | **`group_compare(store_id, revenue_usd)`** | **the planted finding, on the last call** |
+
+So the answer to "before the budget ran low" is **no**. It arrived with zero budget remaining. The
+run passes on a one-call margin: had anything earlier cost one more call, this is a fail.
+
+Two things follow. `detect_outliers` ran for the first time on this dataset in any round (34 of 288
+rows), and the run reached the plan's item 5 — *"detect_outliers on revenue_usd ... then group_compare
+by store_id or region to locate which segment"* — which existed in Day 5's plan too and was never
+executed.
+
+### 2. STORE_07, or the East-region framing again?
+
+**STORE_07, correctly, as finding 1.** But the East-region framing is *also* still there, as
+finding 2:
+
+> **Revenue differs strongly by region** – The East region's average revenue ($165,528) is **3.41×**
+> the South region's average ($48,482) … the difference persists across all stores.
+
+STORE_07 is in East. East is 3.41× *because* STORE_07 is in it. This is the same signal reported a
+second time, one level coarser, as an independent finding — and the clause "the difference persists
+across all stores" is **unsupported and contradicted by its own evidence**: it never compared stores
+within a region, and its own call 12 shows one store at eight times the lowest.
+
+So the Day 5 misattribution is not repeated — the store is named first and correctly — but the
+region finding was not retired once the store explained it.
+
+**This is the first real test of "one signal is one finding", and it failed.** That rule has been
+carried as *untested* since Day 4 because the dataset that exercises it never completed. It has now
+run, and the run double-counted exactly the way the rule was written to prevent.
+
+Two smaller defects in the same report:
+
+- Finding 3 claims "no reversal or attenuation was observed when stratifying by store or region" for
+  the promotions result. No such stratification was run — promotions were examined with
+  `group_compare` only. Nothing was fabricated about a specific flag value, but it asserts a
+  stratification result it does not have.
+- "Checked and not reported" says "All toolkit calls made … produced information that was
+  incorporated into the findings above. No call was made that failed to yield a relevant
+  observation." Call 4 was refused. The section that exists to record what did not make the report
+  omits the one call that produced nothing.
+
+### 3. Which fix caused the improvement?
+
+**One run cannot answer this, and three changes shipped together.** What follows is mechanism
+evidence for each — which is weaker than attribution, and is not a substitute for it.
+
+**The dedup fix: directly observed firing, and the arithmetic fits.**
+
+```
+- compute_correlation(col_a='foot_traffic', col_b='units_sold') -> REFUSED  (budget left: 8)
+  [DUPLICATE_CALL] This exact call has already run in this session and returned: pearson_r=0.9974 ...
+```
+
+The model attempted the same repeat that consumed four calls in Day 5. It was refused once, and the
+next turn moved to a different call — that signature never reappears.
+
+| | Day 5 | Day 6 |
+|---|---|---|
+| attempts at `compute_correlation(foot_traffic, units_sold)` | 4 | 2 |
+| calls wasted on it | 3 | 1 |
+| distinct calls achieved from a 12-call budget | 9 | 11 |
+
+Two extra distinct calls, and the planted finding was reached on call 12. Without them the run ends
+around the equivalent of call 10 — before `detect_outliers` and before `group_compare(store_id, …)`.
+That is a coherent causal story and it is the strongest of the three. It is still one run.
+
+**The schema fix: observably changed the planning input, unlikely to be the cause.** Day 5's planning
+reasoning guessed at the toolkit — *"maybe others? Not listed but typical toolkit includes … But we
+assume these."* Day 6's opens *"Use all functions"* and enumerates all five, `get_summary_stats` and
+`value_counts` included. The guessing is gone.
+
+But it then dropped both of those from the plan ("That's more than 6 … Choose top 5") and never
+called either. More importantly, **the plan was never the bottleneck**: Day 5's plan already
+contained the correct item 5. Better knowledge of a toolkit cannot explain reaching a step the
+previous plan also specified and simply ran out of budget before.
+
+**The contaminated `group_compare` rewrite: the evidence points away from it.** The added text says
+an aggregate is moved by its extreme members and to prefer the most specific grouping key. If that
+had driven behaviour, `group_compare(store_id, …)` should have come *before* `group_compare(region,
+…)`. It came after — region at call 9, store at call 12. During the investigation the agent did not
+prefer the specific key.
+
+It may have influenced the **write-up**: the store leads and the region follows. That ordering is
+equally explained by ranking on magnitude, 8.32 against 3.41. And it plainly did not cause the
+region finding to be retired, which is what the paragraph's logic implies.
+
+**What this does not establish.** The three changes are confounded in one run. The mechanism
+evidence separates them further than nothing does — one fix was seen firing, one was seen changing
+an input that was not the bottleneck, and one is contradicted by call ordering — but none of that is
+a counterfactual. A clean answer needs the run repeated with the executor guard disabled and the
+prompt changes in place, and again with the reverse. That is two runs, and quota is being held.
+
+---
+
+## Status of the fixes
+
+| fix | status after this run |
+|---|---|
+| Executor-level duplicate refusal | **works, and the model obeyed it** — refused once, never re-attempted |
+| Plan turn shown the toolkit | works; guessing gone; two functions still unused |
+| Tool-coverage rebalance | `detect_outliers` and `group_compare` both used heavily (5 of 12 calls) |
+| `group_compare` "most specific key" line | no effect visible on call ordering |
+| Rule 1 (high r is a suspect) | held — both near-identities labelled construction artefacts, at low confidence |
+| Rule 2 (quote the flags) | held — all four stratified results quoted correctly |
+| **One signal is one finding** | **tested for the first time, and FAILED** — the region finding duplicates the store finding |
+
+## What is owed
+
+1. **The one-signal rule needs work, and it is now measurable.** This run is the reproduction case:
+   `group_compare(region, …)` and `group_compare(store_id, …)` on the same column, reported as two
+   findings, with the coarser one carrying an unsupported "persists across all stores".
+2. **Attribution**, if it matters enough to spend two runs: same dataset, one fix disabled at a time.
+3. `marketing_weekly` and `training_productivity` have not been run on Day 6 code. The prompt was
+   rewritten around the two rules they verify, so those verdicts are stale even though the rules
+   held here.
+4. The margin is one call. Twelve is not a comfortable budget for this dataset, and a pass that
+   depends on the last call is not a stable pass.
+
+## Reproducing this
+
+```bash
+python -m agent.run data/test_datasets/store_monthly_sales.csv --max-calls 12 \
+    --trace-dir reports/traces/graded/day6
+```
