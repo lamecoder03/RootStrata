@@ -24,4 +24,7 @@ regressed from.
   finished; it **failed**, leading its report with the `impressions` tautology, and it is what
   exposed the two bugs the Day 5 prompt rules address. The other two aborted on the daily token cap.
 - `graded/day5/` — fresh runs after the Day 5 rules (derived-identity check above r ≈ 0.95; flags
-  quoted from the toolkit rather than recomputed). Scored in `eval/day5_results.md`.
+  quoted from the toolkit rather than recomputed). Scored in `eval/day5_results.md`:
+  `training_productivity` **passes** — the trap dataset's first pass on fixed code —
+  `marketing_weekly` recovers to **partial**, and `store_monthly_sales` again ran out of daily
+  quota at 11 calls, its third round without a gradeable run.
