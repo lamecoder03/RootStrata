@@ -241,3 +241,27 @@ def test_direct_calls_with_an_unknown_method_fail_loudly():
     df = pd.DataFrame({"v": [float(i) for i in range(50)]})
     with pytest.raises(ValueError, match="unknown outlier method"):
         detect_outliers(df, "v", method="isolation_forest")
+
+
+# --- output labelling: a ratio must say what it is a ratio OF -------------------------------------
+
+def test_group_ratios_name_their_denominator(loaded):
+    """Regression: a key called `median_ratio_to_overall`, in a result that also carries
+    `overall_mean`, was read as a ratio to the mean. It is against the median, and now says so."""
+    df, _ = loaded["stores"]
+    result = group_compare(df, "store_id", "revenue_usd")
+
+    group = result["groups"][0]
+    assert "median_ratio_to_overall_median" in group
+    assert "median_ratio_to_overall" not in group
+
+    # and the value really is against the median, not the mean
+    expected = group["median"] / result["overall_median"]
+    assert group["median_ratio_to_overall_median"] == pytest.approx(expected, abs=0.001)
+    assert result["overall_mean"] != result["overall_median"]     # the two differ here, so it matters
+
+    # the headline ratio is highest-over-lowest, which is a different number again
+    assert result["highest_over_lowest_ratio"] == pytest.approx(
+        result["highest_group"]["mean"] / result["lowest_group"]["mean"], abs=0.01)
+    over_overall_mean = result["highest_group"]["mean"] / result["overall_mean"]
+    assert abs(result["highest_over_lowest_ratio"] - over_overall_mean) > 3   # 8.32 vs 5.11

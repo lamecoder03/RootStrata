@@ -181,7 +181,7 @@ def _summarise(function: str, data: dict[str, Any]) -> list[str]:
         return [
             f"{data['n_groups_total']} groups; highest {data['highest_group']['group']} "
             f"(mean {data['highest_group']['mean']:,.1f}), lowest {data['lowest_group']['group']} "
-            f"(mean {data['lowest_group']['mean']:,.1f}), ratio "
+            f"(mean {data['lowest_group']['mean']:,.1f}), highest/lowest ratio "
             f"{data['highest_over_lowest_ratio']}x",
             f"overall mean {data['overall_mean']:,.1f} vs median {data['overall_median']:,.1f}",
         ]

@@ -14,6 +14,19 @@ env/
 # --- generated agent output (the fixtures in data/ ARE committed; these are not) ---
 reports/*
 !reports/.gitkeep
+!reports/generate_report.py
+
+# ...except the traces and the reports they produce, which ARE committed. They are the evidence
+# that the agent's judgment was actually tested: diagnostics/ is the record of how its failures were
+# found, graded/ is the untouched run those fixes are scored on, and generated/ is the deliverable.
+# Git will not re-include a path whose parent directory is excluded, so each directory has to be
+# un-excluded before the pattern that would swallow its contents.
+!reports/traces/
+reports/traces/*
+!reports/traces/README.md
+!reports/traces/diagnostics/
+!reports/traces/graded/
+!reports/generated/
 
 # --- editors / os ---
 .vscode/

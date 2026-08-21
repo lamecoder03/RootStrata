@@ -33,10 +33,13 @@ TURN_HEADROOM = 6
 # context: older tool payloads are compacted to their headline numbers, and if that is not enough,
 # the oldest exchanges are replaced by a note saying what ran.
 #
-# 4000 is calibrated, not guessed: the run that hit the limit was refused at 8074 real tokens and
+# 4400 is calibrated, not guessed: the run that hit the limit was refused at 8074 real tokens and
 # this estimator scored that same transcript around 5450, so char/4 under-counts by roughly 1.4x.
-# 4000 estimated is about 5600 real, leaving room for a reasoning-heavy completion under the 8000 cap.
-CONTEXT_TOKEN_BUDGET = 4000
+# 4400 estimated is about 6200 real, which leaves room for a reasoning-heavy completion under the
+# 8000 cap. The budget covers the whole request - messages AND the tool schemas, which are resent
+# every turn and were previously uncounted, so the real requests were ~700 tokens over what the
+# estimator believed.
+CONTEXT_TOKEN_BUDGET = 4400
 # The most recent results stay in full — those are the ones the next decision depends on.
 KEEP_FULL_RESULTS = 3
 # Rough enough: this only decides *when* to compact, and compacting early is cheap.
@@ -45,18 +48,16 @@ CHARS_PER_TOKEN = 4
 # What the five functions genuinely cannot do. Stated in the prompt so the agent declares a gap
 # instead of inventing an answer — the time-series absence is the one it will hit most often.
 TOOLKIT_LIMITATIONS = """\
-- No time-series or trend analysis. There is no function for a value over time, no seasonality
-  decomposition, no change-point detection and no forecasting. Grouping a measure by a date column
-  with group_compare gives you per-period averages, but that is a comparison, not a trend.
-- No regression and no multivariate analysis. You can stratify a correlation by ONE grouping column
-  at a time; you cannot control for two variables at once or fit a model.
-- No hypothesis testing beyond the p-value that comes back with a correlation.
-- No filtering or slicing. Every function runs over all rows of the file. You cannot analyse a
-  subset except through the grouping that group_compare and group_by already give you.
-- No derived columns. You cannot compute a ratio, a difference, a percentage change or any other
-  new value from existing columns.
-- Grouping keys are capped at 30 distinct values, so a wide column (dates at daily or weekly grain,
-  identifiers) cannot be used to group even when that is the question you want to ask."""
+- No time-series or trend analysis: no value-over-time, seasonality, change-point or forecasting
+  function. Grouping by a date column gives per-period averages - a comparison, not a trend.
+- No regression or multivariate analysis. You can stratify by ONE grouping column at a time; you
+  cannot control for two variables at once or fit a model.
+- No hypothesis testing beyond the p-value returned with a correlation.
+- No filtering or slicing: every function runs over all rows. The only subsetting you have is the
+  grouping that group_compare and group_by provide.
+- No derived columns: no ratios, differences or percentage changes from existing columns.
+- Grouping keys are capped at 30 distinct values, so wide columns (daily/weekly dates, identifiers)
+  cannot be grouped on even when that is the question you want to ask."""
 
 BEGIN_PROMPT = """\
 Good. The toolkit is now available to you.
@@ -85,73 +86,105 @@ report what you actually found.
 
 HOW YOU WORK
 
-1. You already have the file's complete schema profile: column names, inferred roles, distinct
-   counts, missingness and numeric summary statistics. Do not ask for it and do not spend a tool
-   call rediscovering it. Plan from what is in front of you.
-2. In your first message, write a short plan: three to six specific things worth checking in THIS
-   file. Name the actual columns involved in each and say why the question is worth asking. Ground
-   it in the roles and cardinalities you were given, not in what a file like this usually contains.
-3. Then work the plan with tool calls. Revise as results arrive: follow a surprising result, drop
-   a dead end.
+1. You already have the file's full schema profile - columns, roles, distinct counts, missingness,
+   numeric summaries. Do not ask for it or spend a call rediscovering it. Plan from what you have.
+2. First write a short plan: three to six specific things worth checking in THIS file, naming the
+   actual columns and why each question is worth asking. Ground it in the roles and cardinalities
+   you were given, not in what a file like this usually contains.
+3. Work the plan with tool calls, revising as results arrive: follow a surprise, drop a dead end.
 4. Stop when further calls would not change your conclusions, and write up what you found.
 
 JUDGMENT - THIS IS THE PART THAT MATTERS
 
 A number is not a finding. Deciding which numbers mean something is the entire job.
 
-- When you find a correlation worth reporting and the file has a plausible grouping column, re-run
-  compute_correlation with group_by set BEFORE concluding anything about it. An unstratified
-  correlation is not yet evidence.
-- If a result comes back with "sign_reversal": true, the pooled correlation is an artefact of that
-  grouping: the relationship runs the OTHER WAY inside the subgroups. Your conclusion must change
-  accordingly. Report the within-group direction as the real one, name the grouping column as the
-  confounder, and do not recommend acting on the pooled number.
-- If "attenuated": true, the relationship largely vanishes within subgroups. It is explained by the
-  grouping variable rather than by the two columns you correlated. Say so.
-- If both flags are false, the relationship survived stratification. That makes it a materially
-  stronger finding than an unstratified correlation of the same size, and worth saying out loud.
+STRATIFY BEFORE YOU CONCLUDE
+
+When you find a correlation worth reporting and the file has a plausible grouping column, re-run
+compute_correlation with group_by set BEFORE concluding anything about it. An unstratified
+correlation is not yet evidence. Every stratified result carries two flags. They describe two
+different ways a pooled correlation can be fake, and they are equally disqualifying.
+
+- "sign_reversal": true - the relationship RUNS THE OTHER WAY inside the subgroups. The pooled
+  number is an artefact of mixing groups whose means differ. Report the within-group direction as
+  the real one, name the grouping column as the confounder, and do not recommend acting on the
+  pooled number.
+- "attenuated": true - the relationship VANISHES inside the subgroups: the strongest subgroup
+  correlation is less than half the pooled one. The pooled number is explained by the grouping
+  variable, not by the two columns you correlated. This is exactly as disqualifying as a reversal
+  and must be treated the same way. Do not present an attenuated pair as a finding about those two
+  columns. Do not call it strong, robust, or consistent. Do not give it high confidence. If there
+  is a finding here at all it is about the grouping variable, and the honest headline is that the
+  apparent relationship is explained away by it.
+- Both false - the relationship survived that particular split. That is a materially stronger
+  finding than an unstratified correlation of the same size, and worth saying out loud.
+
+CONFIDENCE FOLLOWS THE WORST STRATIFICATION YOU RAN, NOT THE BEST
+
+If you stratify the same pair by more than one grouping column, your confidence must reflect the
+LEAST favourable result, not the most convenient one. A pair that holds by one grouping and
+attenuates by another is an attenuated pair - report it that way. A reassuring split never
+out-votes a disqualifying one, and finding some grouping where the relationship survives is not
+evidence that it is real; it only shows that particular variable is not the confounder. When you
+report a pair, state every stratification you ran on it, including the ones that undermined it.
+
+ONE SIGNAL IS ONE FINDING
+
+Columns in a file are often mechanically linked: revenue tracks units sold, foot traffic tracks
+both. So one underlying phenomenon will usually show up several times - in several correlated
+columns, or in a segment and again in the wider group that contains that segment. That is ONE
+finding with several pieces of corroborating evidence, not several findings. Write it once, and
+list the corroboration beneath it. Before adding a numbered finding, ask whether it is really the
+same signal you have already reported, seen through a different column: a reader who counts five
+findings should be able to act on five different things.
+
+OTHER THINGS TO WEIGH
+
 - Not every strong correlation is a finding. Ask whether one column is mechanically derived from
   the other, and whether the relationship is too self-evident to deserve a reader's attention.
 - detect_outliers tells you THAT some rows are extreme. It does not tell you what they are. Use
   group_compare to find which segment or period they belong to before drawing any conclusion from
   them. Consider whether an effect that shows up everywhere at once is really an anomaly.
+- Quote a number with the denominator the toolkit actually used. Ratios are named in full -
+  "highest_over_lowest_ratio" is highest over lowest, "median_ratio_to_overall_median" is against
+  the median. Do not restate one of them against a different baseline.
 - Keep what you measured separate from what you are inferring. You cannot test causation here.
 
 WHEN A CALL IS REJECTED
 
-Rejections are normal, and they are informative. The error names the columns that WOULD have worked
-for that parameter, or the values that argument accepts. Read it and issue a corrected call. Do not
-repeat a rejected call unchanged, and do not abandon a question because the first attempt was
-refused. Rejected calls are charged against your budget, so read the message rather than guessing
-again.
+Rejections are normal and informative: the error names the columns that WOULD have worked, or the
+values the argument accepts. Read it and issue a corrected call. Never repeat a rejected call
+unchanged, and never abandon a question because the first attempt was refused. Rejections are
+charged against your budget, so read the message rather than guessing again.
 
 WHAT THIS TOOLKIT CANNOT DO
 
 {limitations}
 
-If an investigation you judge worthwhile needs something on that list, do not guess at the answer
-and do not quietly drop the thread. Record it under "Not investigable with this toolkit", saying
-what you would have checked and what was missing.
+If a worthwhile investigation needs something on that list, do not guess and do not quietly drop
+it. Record it under "Not investigable with this toolkit" with what you would have checked.
 
 BUDGET
 
-Every tool result tells you how many calls remain. When the budget is nearly gone, stop
-investigating and write up what you have.
+Every tool result tells you how many calls remain. When it is nearly gone, stop and write up.
 
 YOUR FINAL ANSWER
 
 When you are finished, reply with no tool calls, using exactly these headings:
 
 ## Findings
-Numbered, most important first. For each: what you found, the specific numbers supporting it, how
-confident you are, and any caveat a reader needs. Where stratification changed your reading of a
-relationship, say so explicitly.
+Numbered, most important first, ONE distinct signal per entry - corroborating evidence from other
+columns belongs inside the entry it supports, never as an entry of its own. For each: what you
+found, the specific numbers supporting it, every stratification you ran on that pair including any
+that undermined it, how confident you are, and any caveat a reader needs. Where stratification
+changed your reading of a relationship, say so explicitly.
 
 ## Checked and not reported
-What you investigated that did not earn a place in the findings, with one line on why.
+What you actually investigated that did not earn a place in the findings, one line each on why.
+List only calls you really made.
 
 ## Not investigable with this toolkit
-Questions this file raises that the five functions cannot answer. Omit this section if empty."""
+Questions this file raises that the five functions cannot answer. Omit if empty."""
 
 
 @dataclass(frozen=True)
@@ -286,6 +319,8 @@ def run_planner(
     profile = toolkit.profile
     tools = tools_for_profile(profile)
     max_calls = toolkit.cap.limit
+    # The schemas are re-sent on every turn, so they are part of every request's size.
+    schema_overhead = len(json.dumps(tools)) // CHARS_PER_TOKEN
 
     system_prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
     task_prompt = build_task_prompt(profile, focus, max_calls, tools)
@@ -333,7 +368,7 @@ def run_planner(
     for index in range(first_index, max_turns + 1):
         run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
         run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
-                                       protected=protected)
+                                       protected=protected, overhead=schema_overhead)
         response = _safe_complete(model, run.messages, tools, run)
         if response is None:
             emit("aborted", run.error)
@@ -368,7 +403,7 @@ def run_planner(
         emit("wrapping_up", run.stop_reason)
         run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger)}
         run.messages = trim_transcript(run.messages, headlines, budget=context_budget,
-                                       protected=protected)
+                                       protected=protected, overhead=schema_overhead)
         writeup = _safe_complete(model, run.messages, None, run, writeup_for=run.stop_reason)
         if writeup is not None:
             run.turns.append(_turn(len(run.turns) + 1, writeup, (), kind="writeup"))
@@ -488,9 +523,14 @@ def _signature(function: str, arguments: dict[str, Any]) -> str:
     return f"{function}({rendered})"
 
 
-def _estimate_tokens(messages: list[dict[str, Any]]) -> int:
-    """Cheap character-based estimate. Only used to decide when to compact, so precision is waste."""
-    return sum(len(json.dumps(message, default=str)) for message in messages) // CHARS_PER_TOKEN
+def _estimate_tokens(messages: list[dict[str, Any]], overhead: int = 0) -> int:
+    """Cheap character-based estimate of one whole request. Precision is waste; direction is not.
+
+    `overhead` is for anything sent alongside the messages - in practice the tool schemas, which go
+    up on every turn. Leaving them out made the estimate quietly optimistic by about 700 tokens.
+    """
+    body = sum(len(json.dumps(message, default=str)) for message in messages) // CHARS_PER_TOKEN
+    return body + overhead
 
 
 def _headline(invocation: ToolInvocation) -> str:
@@ -511,9 +551,12 @@ def _headline(invocation: ToolInvocation) -> str:
                 f"{data.get('n_present')} rows")
     if invocation.function == "group_compare":
         high, low = data.get("highest_group", {}), data.get("lowest_group", {})
+        # Name the ratio. A bare "ratio 8.32" in the ledger is what a previous run read as
+        # "8.3x the overall mean" when it is highest-over-lowest; the overall mean ratio was 5.1.
         return (f"{data.get('n_groups_total')} groups; highest {high.get('group')}"
                 f"={high.get('mean')}, lowest {low.get('group')}={low.get('mean')}, "
-                f"ratio {data.get('highest_over_lowest_ratio')}")
+                f"highest/lowest={data.get('highest_over_lowest_ratio')}; "
+                f"overall mean={data.get('overall_mean')}, median={data.get('overall_median')}")
     if invocation.function == "get_summary_stats":
         return f"mean={data.get('mean')}, median={data.get('median')}, missing={data.get('missing_pct')}%"
     if invocation.function == "value_counts":
@@ -526,6 +569,7 @@ def trim_transcript(
     headlines: dict[str, str],
     budget: int = CONTEXT_TOKEN_BUDGET,
     protected: int | None = None,
+    overhead: int = 0,
 ) -> list[dict[str, Any]]:
     """Shrink the transcript to fit the budget, cheapest loss first.
 
@@ -534,7 +578,7 @@ def trim_transcript(
     as units — an assistant message with tool_calls and its tool replies go together, because a
     tool_call without its reply makes the request malformed.
     """
-    if _estimate_tokens(messages) <= budget:
+    if _estimate_tokens(messages, overhead) <= budget:
         return messages
 
     trimmed = [dict(message) for message in messages]
@@ -548,13 +592,13 @@ def trim_transcript(
         compacted = json.dumps({"ok": None, "summary": headline, "note": "payload compacted"})
         if len(compacted) < len(trimmed[position]["content"]):
             trimmed[position]["content"] = compacted
-        if _estimate_tokens(trimmed) <= budget:
+        if _estimate_tokens(trimmed, overhead) <= budget:
             return trimmed
 
     # Still over. Drop the oldest exchanges, keeping the protected prefix: the system prompt, the
     # profile, the ledger, the plan and the message that handed over the toolkit.
     prefix = _protected_prefix(trimmed) if protected is None else protected
-    while _estimate_tokens(trimmed) > budget:
+    while _estimate_tokens(trimmed, overhead) > budget:
         end = _first_exchange_end(trimmed, prefix)
         if end is None:
             break

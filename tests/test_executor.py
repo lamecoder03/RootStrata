@@ -138,3 +138,37 @@ def test_the_audit_log_can_be_mirrored_to_disk(make_toolkit, tmp_path):
     assert len(lines) == 2
     assert '"outcome": "allowed"' in lines[0]
     assert '"outcome": "rejected"' in lines[1]
+
+
+# --- the audit summary must carry both stratification flags -------------------------------------
+
+def test_the_audit_summary_records_both_stratification_flags(make_toolkit):
+    """Regression: it logged sign_reversal but not attenuated, so the flag that decided a grade
+    was missing from the record. A reversal and an attenuation are different failures."""
+    toolkit = make_toolkit("training")
+
+    reversed_call = toolkit.call("compute_correlation", {
+        "col_a": "weekly_training_hours", "col_b": "output_points", "group_by": "role_tier"})
+    assert reversed_call.data["sign_reversal"] is True
+    summary = toolkit.audit.entries[-1].result_summary
+    assert "sign_reversal=True" in summary
+    assert "attenuated=False" in summary
+
+    attenuated_call = toolkit.call("compute_correlation", {
+        "col_a": "tenure_months", "col_b": "output_points", "group_by": "role_tier"})
+    assert attenuated_call.data["attenuated"] is True
+    summary = toolkit.audit.entries[-1].result_summary
+    assert "attenuated=True" in summary
+    assert "sign_reversal=False" in summary
+
+
+def test_an_unstratified_correlation_logs_neither_flag(make_toolkit):
+    """The flags only exist when group_by was passed; the summary should not invent them."""
+    toolkit = make_toolkit("training")
+    toolkit.call("compute_correlation",
+                 {"col_a": "weekly_training_hours", "col_b": "output_points"})
+
+    summary = toolkit.audit.entries[-1].result_summary
+    assert "sign_reversal" not in summary
+    assert "attenuated" not in summary
+    assert "pearson_r" in summary

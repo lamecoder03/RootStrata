@@ -128,14 +128,14 @@ def _render_group_compare(data: dict[str, Any]) -> list[str]:
     for group in head:
         lines.append(
             f"    {group['group']:<18}{group['n']:>5}{group['mean']:>14,.0f}"
-            f"{group['median']:>14,.0f}{group['median_ratio_to_overall']:>18.2f}"
+            f"{group['median']:>14,.0f}{group['median_ratio_to_overall_median']:>18.2f}"
         )
     if tail:
         lines.append(f"    ... {data['n_groups_returned'] - len(head) - len(tail)} more ...")
         for group in tail:
             lines.append(
                 f"    {group['group']:<18}{group['n']:>5}{group['mean']:>14,.0f}"
-                f"{group['median']:>14,.0f}{group['median_ratio_to_overall']:>18.2f}"
+                f"{group['median']:>14,.0f}{group['median_ratio_to_overall_median']:>18.2f}"
             )
     if data["truncated"]:
         lines.append(f"    ({data['truncation_note']})")

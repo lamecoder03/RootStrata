@@ -1,0 +1,95 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "D:\Archit\DA\AutoSight\agent\run.py", line 163, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "D:\Archit\DA\AutoSight\agent\run.py", line 140, in main
+    run = run_planner(
+        toolkit,
+    ...<5 lines>...
+        context_budget=args.context_budget,
+    )
+  File "D:\Archit\DA\AutoSight\agent\planner_loop.py", line 332, in run_planner
+    response = model.complete(run.messages, tools=tools)
+  File "D:\Archit\DA\AutoSight\agent\llm.py", line 179, in complete
+    raise RuntimeError(f"Groq call failed after {MAX_RETRIES} attempts: {last_error}")
+RuntimeError: Groq call failed after 4 attempts: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01m0g3gdz0e4rb8b4fxq9r8pbz` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 195635, Requested 4769. Please try again in 2m54.528s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
+================================================================================================
+ training_productivity.csv -- 450 rows x 7 columns
+ model=openai/gpt-oss-120b  budget=14 calls / 20 turns  focus=none
+================================================================================================
+
+--- plan --------------------------------------------------------------------------------------
+    **Plan – What to investigate and why**
+    1. **Training ↔ Productivity** – Compute the correlation between **weekly_training_hours**
+    and **output_points**.
+       *Why*: Training time is a plausible driver of output; a strong (positive or negative)
+    link would be noteworthy. I will also stratify this correlation by **role_tier** and
+    **region** to see whether the relationship holds across job levels or locations.
+    2. **Peer Review ↔ Productivity** – Compute the correlation between **peer_review_score**
+    and **output_points**.
+       *Why*: Peer‑review scores are intended to reflect quality or collaboration; a meaningful
+    association with output would suggest they capture productive behavior. Again, I will test
+    the relationship within each **role_tier** and **region**.
+    3. **Tenure ↔ Productivity** – Compute the correlation between **tenure_months** and
+    **output_points**.
+       *Why*: More experienced employees might be more productive, but there could be
+    diminishing returns. Stratifying by **role_tier** and **region** will reveal whether any
+    effect is driven by seniority within specific groups.
+    4. **Group‑level performance differences** – Use **group_compare** to compare the mean
+    **output_points** across the two categorical keys (**role_tier** and **region**).
+       *Why*: Identifying systematic differences in productivity by job tier or geographic
+    region can highlight structural patterns (e.g., Tier 3 specialists delivering higher output,
+    or a region lagging).
+    5. **Extreme performers** – Run **detect_outliers** on **output_points** (and optionally on
+    **peer_review_score**).
+       *Why*: Outliers may represent exceptionally high or low performers. After detecting them,
+    I will use **group_compare** to see which **role_tier** or **region** they belong to,
+    ensuring any conclusions about outliers are contextualised rather than attributing them to
+    the whole dataset.
+
+--- turn 2 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='weekly_training_hours', col_b='output_points') -> ok [13 left]
+
+--- turn 3 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='weekly_training_hours', col_b='output_points', group_by='role_tier') -> ok [12 left]
+      pooled r is +0.760, but 3 of 3 subgroups have the opposite sign (subgroup range -0.554 to
+      -0.551)
+
+--- turn 4 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='peer_review_score', col_b='output_points') -> ok [11 left]
+
+--- turn 5 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='weekly_training_hours', col_b='output_points', group_by='region') -> ok [10 left]
+      pooled r is +0.760 and all 3 subgroups agree in direction (subgroup range +0.732 to
+      +0.802)
+
+--- turn 6 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='peer_review_score', col_b='output_points', group_by='role_tier') -> ok [9 left]
+      pooled r is +0.753 and all 3 subgroups agree in direction (subgroup range +0.593 to
+      +0.602)
+
+--- turn 7 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='tenure_months', col_b='output_points') -> ok [8 left]
+
+--- turn 8 ------------------------------------------------------------------------------------
+  > group_compare(group_col='role_tier', value_col='output_points') -> ok [7 left]
+
+--- turn 9 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='tenure_months', col_b='output_points', group_by='role_tier') -> ok [6 left]
+      pooled r is +0.853, but the strongest subgroup r is only -0.078 - the relationship largely
+      disappears within subgroups
+
+--- turn 10 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='tenure_months', col_b='output_points', group_by='region') -> ok [5 left]
+      pooled r is +0.853 and all 3 subgroups agree in direction (subgroup range +0.839 to
+      +0.872)
+
+--- turn 11 ------------------------------------------------------------------------------------
+  > compute_correlation(col_a='peer_review_score', col_b='output_points', group_by='region') -> ok [4 left]
+      pooled r is +0.753 and all 3 subgroups agree in direction (subgroup range +0.710 to
+      +0.798)
+EXIT=1
+
+[exited with code 0]

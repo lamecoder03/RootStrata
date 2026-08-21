@@ -398,16 +398,29 @@ def test_trimming_compacts_old_results_before_dropping_anything(training_kit):
            for i in range(5)]
         + [say("## Findings\nDone.")]
     )
-    run = run_planner(kit, model, model_name="stub")
+    # A budget large enough that the loop never trims while running, so this test controls the
+    # trimming itself rather than inspecting whatever the loop happened to leave behind.
+    run = run_planner(kit, model, model_name="stub", context_budget=1_000_000)
     headlines = {inv.call_id: _headline(inv) for t in run.turns for inv in t.invocations}
+    assert not any("elided" in str(m.get("content")) for m in run.messages)
 
     full = _estimate_tokens(run.messages)
-    compacted = trim_transcript(run.messages, headlines, budget=full - 200, protected=5)
+    compacted = trim_transcript(run.messages, headlines, budget=full - 100, protected=5)
 
     assert _estimate_tokens(compacted) < full
     assert len(compacted) == len(run.messages)          # compaction only, nothing dropped yet
     assert any("payload compacted" in str(m.get("content")) for m in compacted)
     _assert_transcript_is_well_formed(compacted)
+
+
+def test_the_context_budget_covers_the_tool_schemas_too(training_kit):
+    """Regression: the schemas are resent every turn but were not counted, so real requests ran
+    about 700 tokens over what the estimator believed and a 413 arrived unexplained."""
+    from agent.planner_loop import _estimate_tokens as est
+
+    messages = [{"role": "user", "content": "x" * 400}]
+    assert est(messages) < est(messages, overhead=700)
+    assert est(messages, overhead=700) - est(messages) == 700
 
 
 # --- a dying API must not take the evidence with it ---------------------------------------------

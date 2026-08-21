@@ -324,9 +324,12 @@ def group_compare(df: pd.DataFrame, group_col: str, value_col: str) -> dict[str,
             "std": _j(row["std"]),
             "min": _j(row["min"]),
             "max": _j(row["max"]),
-            # Ratio to the pooled median, not the pooled mean: the mean is exactly what a runaway
-            # segment distorts, so comparing against it would hide the segment.
-            "median_ratio_to_overall": (
+            # Ratio to the pooled MEDIAN, not the pooled mean: the mean is exactly what a runaway
+            # segment distorts, so comparing against it would hide the segment. The key says
+            # "overall_median" in full because a result that also carries `overall_mean` and calls
+            # this one "ratio_to_overall" is ambiguous - a reader picked the wrong denominator and
+            # reported a segment as being within 5% of a mean it was 37% below.
+            "median_ratio_to_overall_median": (
                 _j(float(row["median"]) / overall_median) if overall_median != 0 else None
             ),
         }
