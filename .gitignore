@@ -13,8 +13,8 @@ env/
 
 # --- generated agent output (the fixtures in data/ ARE committed; these are not) ---
 reports/*
-!reports/.gitkeep
 !reports/generate_report.py
+!reports/format_output.py
 
 # ...except the traces and the reports they produce, which ARE committed. They are the evidence
 # that the agent's judgment was actually tested: diagnostics/ is the record of how its failures were

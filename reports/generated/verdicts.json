@@ -1,0 +1,25 @@
+{
+  "_comment": "Grading verdicts for the badge at the top of each formatted HTML report. Transcribed by hand from the grading records in eval/; those documents remain the authority. A report with no entry here renders without a badge - the formatter never infers a verdict.",
+  "_keys": "A key is a report stem, or a path suffix when one dataset has been graded more than once: store_monthly_sales.csv has two graded runs, the earlier at the top level and the later under run2/.",
+
+  "run2/store_monthly_sales_report.md": {
+    "verdict": "PARTIAL",
+    "round": "Run 2",
+    "note": "Names STORE_07 at 8.32x the lowest store, then reports the East region at 3.41x as a separate finding - the same anomaly one level coarser."
+  },
+  "store_monthly_sales_report": {
+    "verdict": "PARTIAL",
+    "round": "Run 1",
+    "note": "Finds the anomaly but attributes it to the East region rather than to STORE_07."
+  },
+  "marketing_weekly_report": {
+    "verdict": "PARTIAL",
+    "round": "Run 1",
+    "note": "Correctly calls the impressions identity a property of the data construction, then prints it as finding 1 anyway."
+  },
+  "training_productivity_report": {
+    "verdict": "PASS",
+    "round": "Run 1",
+    "note": "The trap dataset. Quotes sign_reversal = true, states the within-tier relationship is negative, and withholds the recommendation."
+  }
+}
