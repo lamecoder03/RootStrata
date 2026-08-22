@@ -1,8 +1,7 @@
-"""
-trace.py — writes a run out in a form somebody can actually read: the reasoning, not just the answer.
-Exists because the interesting question about this agent is HOW it reached a conclusion — which leads
-it followed, which calls were refused and how it recovered, whether a reversal flag actually changed
-its mind. Emits a narrative markdown trace, the raw message transcript, and the audit log beside them.
+"""Writes a completed run out in readable form.
+
+Emits a narrative markdown trace covering the reasoning, the calls and their outcomes, plus the
+raw message transcript and the audit log beside it.
 """
 
 from __future__ import annotations
@@ -13,8 +12,7 @@ from typing import Any
 
 from agent.planner_loop import PlannerRun, ToolInvocation
 
-# Reasoning text is kept but bounded: gpt-oss can emit a lot of it, and a trace nobody scrolls
-# through is no more inspectable than no trace at all.
+# Reasoning text is kept but bounded, since gpt-oss can emit a lot of it.
 MAX_REASONING_CHARS = 4000
 
 
@@ -35,7 +33,7 @@ def write_trace(run: PlannerRun, directory: Path, stem: str) -> dict[str, Path]:
 
 
 def render_trace(run: PlannerRun) -> str:
-    """The narrative version: header, what it was given, every turn, the answer, the audit."""
+    """Render the narrative trace: header, inputs, every turn, the answer, the audit."""
     out: list[str] = []
     out += _header(run)
     out += _given(run)
@@ -70,7 +68,7 @@ def _header(run: PlannerRun) -> list[str]:
 
 
 def _given(run: PlannerRun) -> list[str]:
-    """Both prompts in full. A trace that hides the instructions cannot be argued with."""
+    """Render both prompts in full."""
     return [
         "---",
         "",
@@ -96,8 +94,8 @@ def _given(run: PlannerRun) -> list[str]:
     ]
 
 
-# How each kind of turn is labelled in the trace, so a reader can see the shape of the run at a
-# glance: one plan, N acting turns, and either a self-chosen ending or a forced write-up.
+# How each kind of turn is labelled in the trace: one plan, N acting turns, and either a
+# self-chosen ending or a forced write-up.
 TURN_LABELS = {
     "plan": "Turn {index} - planning (no tools offered on this turn)",
     "act": "Turn {index}",
@@ -142,10 +140,9 @@ def _invocation(invocation: ToolInvocation) -> list[str]:
 
 
 def _summarise(function: str, data: dict[str, Any]) -> list[str]:
-    """Compact result lines, emphasising what a reader of a *reasoning* trace cares about.
+    """Compact result lines for the trace.
 
-    For correlations that means the stratification flags, not the full group list: the whole point
-    of reading a trace is seeing whether a reversal registered.
+    For correlations this reports the stratification flags rather than the full group list.
     """
     if function == "compute_correlation":
         overall = data.get("overall", {})

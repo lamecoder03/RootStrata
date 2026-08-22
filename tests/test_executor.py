@@ -1,8 +1,7 @@
-"""
-test_executor.py — proves the three guardrails actually compose, and in the right order.
-Exists because each guard passing on its own says nothing about the door they are bolted to: these
-tests assert the cap is charged before validation, that a rejected call never reaches pandas, that a
-crash inside a tool is contained and logged, and that no call path skips the audit log.
+"""Tests that the three guardrails compose in the right order.
+
+Asserts the cap is charged before validation, that a rejected call never reaches pandas, that a
+crash is contained and logged, and that a completed call is refused rather than re-run.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ def test_a_valid_call_returns_data_and_is_logged_as_allowed(make_toolkit):
 
 
 def test_a_rejected_call_returns_the_reason_instead_of_raising(make_toolkit):
-    """Validation failure is recoverable, so it comes back as data the agent can read and retry from."""
+    """A validation failure returns a ToolResult carrying the reason rather than raising."""
     toolkit = make_toolkit("training")
     result = toolkit.call("group_compare", {"group_col": "employee_id", "value_col": "output_points"})
 
@@ -52,7 +51,7 @@ def test_an_unknown_function_never_reaches_the_toolkit(make_toolkit):
 
 
 def test_the_cap_is_charged_before_validation(make_toolkit):
-    """Ordering matters: if rejection were free, an agent emitting garbage would loop forever."""
+    """The cap is charged first, so a rejected call still consumes budget."""
     toolkit = make_toolkit("marketing", max_calls=2)
     toolkit.call("nonsense_tool", {})
     assert toolkit.cap.used == 1
@@ -68,7 +67,7 @@ def test_the_cap_raises_through_the_executor_to_the_caller(make_toolkit):
 
 
 def test_a_crash_inside_a_tool_is_contained_and_logged(make_toolkit, monkeypatch):
-    """A toolkit bug should end one call, not the run — and it must still leave a record."""
+    """A toolkit exception ends one call rather than the run, and is still logged."""
     toolkit = make_toolkit("marketing")
 
     def exploding(df, column):
@@ -94,7 +93,7 @@ def test_a_crash_inside_a_tool_is_contained_and_logged(make_toolkit, monkeypatch
 
 
 def toolkit_spec_params():
-    """Reuse the real parameter spec so the stub above is validated exactly like the genuine tool."""
+    """Reuse the real parameter spec, so the stub tool is validated like a genuine one."""
     from toolkit.registry import get_tool
 
     return get_tool("get_summary_stats").params
@@ -143,8 +142,7 @@ def test_the_audit_log_can_be_mirrored_to_disk(make_toolkit, tmp_path):
 # --- the audit summary must carry both stratification flags -------------------------------------
 
 def test_the_audit_summary_records_both_stratification_flags(make_toolkit):
-    """Regression: it logged sign_reversal but not attenuated, so the flag that decided a grade
-    was missing from the record. A reversal and an attenuation are different failures."""
+    """The audit summary records both sign_reversal and attenuated, which are different results."""
     toolkit = make_toolkit("training")
 
     reversed_call = toolkit.call("compute_correlation", {
@@ -163,7 +161,7 @@ def test_the_audit_summary_records_both_stratification_flags(make_toolkit):
 
 
 def test_an_unstratified_correlation_logs_neither_flag(make_toolkit):
-    """The flags only exist when group_by was passed; the summary should not invent them."""
+    """The flags exist only when group_by was passed; the summary does not invent them."""
     toolkit = make_toolkit("training")
     toolkit.call("compute_correlation",
                  {"col_a": "weekly_training_hours", "col_b": "output_points"})
@@ -177,9 +175,7 @@ def test_an_unstratified_correlation_logs_neither_flag(make_toolkit):
 # --- a completed call is refused, not re-run -----------------------------------------------------
 
 def test_an_identical_completed_call_is_refused_before_it_reaches_pandas(make_toolkit):
-    """Regression from the Day 5 store_monthly_sales run: the agent issued the same
-    compute_correlation four times with a ledger in front of it saying so in capitals. Annotation
-    is advice; the executor is the only layer that can decline."""
+    """A call whose signature matches a completed call is refused before it reaches pandas."""
     from guardrails.executor import DUPLICATE_CALL
 
     kit = make_toolkit("training", max_calls=10)
@@ -196,7 +192,7 @@ def test_an_identical_completed_call_is_refused_before_it_reaches_pandas(make_to
 
 
 def test_the_refusal_hands_back_the_answer_it_already_has(make_toolkit):
-    """A refusal that just says no wastes the call twice. It quotes the earlier result."""
+    """The duplicate refusal quotes the result the earlier call already produced."""
     kit = make_toolkit("training", max_calls=10)
     kit.call("get_summary_stats", {"column": "output_points"})
 
@@ -206,8 +202,7 @@ def test_the_refusal_hands_back_the_answer_it_already_has(make_toolkit):
 
 
 def test_a_duplicate_still_costs_a_call(make_toolkit):
-    """Consistent with rejected calls being charged: if refusing were free, an agent stuck in a
-    repeat could loop until the turn ceiling instead of terminating at its budget."""
+    """A duplicate is charged a call, consistent with rejected calls consuming budget."""
     kit = make_toolkit("training", max_calls=10)
     kit.call("get_summary_stats", {"column": "output_points"})
     kit.call("get_summary_stats", {"column": "output_points"})
@@ -218,8 +213,8 @@ def test_a_duplicate_still_costs_a_call(make_toolkit):
 
 
 def test_two_spellings_of_one_call_are_the_same_call(make_toolkit):
-    """The signature is built from the validator's normalised arguments, so an explicitly-null
-    optional argument and an omitted one are one call, not two."""
+    """The signature comes from the validator's normalised arguments, so an explicitly-null
+    optional argument and an omitted one are one call."""
     kit = make_toolkit("training", max_calls=10)
 
     first = kit.call("compute_correlation",
@@ -233,7 +228,7 @@ def test_two_spellings_of_one_call_are_the_same_call(make_toolkit):
 
 
 def test_a_different_grouping_is_a_different_call(make_toolkit):
-    """The guard must never block genuine progress: adding group_by asks a new question."""
+    """Adding group_by is a different question, so it is not blocked as a duplicate."""
     kit = make_toolkit("training", max_calls=10)
     pair = {"col_a": "weekly_training_hours", "col_b": "output_points"}
 
@@ -243,8 +238,8 @@ def test_a_different_grouping_is_a_different_call(make_toolkit):
 
 
 def test_a_repeated_invalid_call_keeps_its_own_rejection(make_toolkit):
-    """A rejected call never completed, so it is not a duplicate. Its own error names the columns
-    that would have worked, and that message is the whole self-correction mechanism."""
+    """A rejected call never completed, so it is not a duplicate and keeps its own error, which
+    names the columns that would have worked."""
     kit = make_toolkit("training", max_calls=10)
     bad = {"group_col": "employee_id", "value_col": "output_points"}
 
@@ -256,8 +251,7 @@ def test_a_repeated_invalid_call_keeps_its_own_rejection(make_toolkit):
 
 
 def test_the_duplicate_refusal_is_written_to_the_audit_log(make_toolkit):
-    """Every attempt is recorded, refusals included - that is what makes the log a faithful record
-    of what the agent tried rather than of what it was allowed to do."""
+    """The duplicate refusal is written to the audit log, like every other attempt."""
     kit = make_toolkit("training", max_calls=10)
     kit.call("value_counts", {"column": "role_tier"})
     kit.call("value_counts", {"column": "role_tier"})

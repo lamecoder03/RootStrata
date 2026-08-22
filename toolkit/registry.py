@@ -1,8 +1,8 @@
-"""
-registry.py — the allowlist itself: one declarative ToolSpec per analysis function, naming each
-parameter and the column roles (and cardinality) that parameter will accept.
-Exists so the agent's entire action space is a data structure that can be read and tested before any
-file is loaded; the validator enforces it against a real profile, and Day 3 renders it as tool schemas.
+"""The allowlist: one declarative ToolSpec per analysis function.
+
+Each spec names the function's parameters and the column roles and cardinality each parameter
+accepts. The validator enforces it against a real profile; to_openai_tools renders it as tool
+schemas.
 """
 
 from __future__ import annotations
@@ -31,16 +31,15 @@ PARAM_ENUM = "enum"
 MEASURABLE_ROLES = (ROLE_NUMERIC, ROLE_BOOLEAN)
 GROUPABLE_ROLES = (ROLE_CATEGORICAL, ROLE_BOOLEAN, ROLE_NUMERIC, ROLE_DATETIME)
 COUNTABLE_ROLES = (ROLE_CATEGORICAL, ROLE_BOOLEAN, ROLE_NUMERIC, ROLE_DATETIME)
-# `identifier` and `empty` are absent from every group on purpose: grouping by a primary key
-# produces one row per group, and an all-null column supports no operation at all.
+# `identifier` and `empty` are in no group: grouping by a primary key produces one row per group,
+# and an all-null column supports no operation.
 
-# Role alone is not enough, which is the interesting half of this design. A column can hold the
-# right *kind* of value and still be a nonsense argument: `revenue_usd` is numeric, but grouping by
-# it yields 288 groups of one row. So column parameters also carry a cardinality bound, checked
-# against the profile's real distinct_count at validation time.
-MAX_GROUP_KEY_DISTINCT = 30    # group_compare returns at most 20 groups; beyond ~30 the agent
-                               # would systematically be shown a truncated, misleading picture
-MAX_VALUE_COUNTS_DISTINCT = 100  # a distribution view stays meaningful wider than a comparison does
+# Column parameters also carry a cardinality bound, checked against the profile's real
+# distinct_count at validation time. Role alone is not enough: `revenue_usd` is numeric, but
+# grouping by it yields one row per group.
+MAX_GROUP_KEY_DISTINCT = 30    # group_compare returns at most 20 groups; beyond ~30 the result
+                               # would be a truncated view of the data
+MAX_VALUE_COUNTS_DISTINCT = 100  # a distribution view stays readable wider than a comparison
 
 
 @dataclass(frozen=True)
@@ -59,7 +58,7 @@ class ParamSpec:
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """One allowlisted function: what it is, what it needs, and which arguments must not collide."""
+    """One allowlisted function: its name, its parameters, and which arguments must not collide."""
 
     name: str
     fn: Callable[..., dict]
@@ -175,7 +174,7 @@ _BY_NAME: dict[str, ToolSpec] = {tool.name: tool for tool in TOOLS}
 
 
 def get_tool(name: str) -> ToolSpec | None:
-    """Look up a tool by name. Returns None for anything not on the allowlist — the caller decides."""
+    """Look up a tool by name. Returns None for anything not on the allowlist."""
     return _BY_NAME.get(name)
 
 
@@ -185,7 +184,7 @@ def tool_names() -> tuple[str, ...]:
 
 
 def describe_toolkit() -> str:
-    """Render the allowlist as readable text — the same content the validator enforces."""
+    """Render the allowlist as readable text."""
     lines: list[str] = []
     for tool in TOOLS:
         lines.append(f"{tool.name}({', '.join(_render_param(p) for p in tool.params)})")
@@ -209,9 +208,8 @@ def _render_param(param: ParamSpec) -> str:
 def to_openai_tools(profile: dict[str, Any]) -> list[dict[str, Any]]:
     """Render the allowlist as OpenAI-style tool schemas, narrowed to one file's real columns.
 
-    The same registry drives both sides: the model is only *offered* columns that would pass, and
-    the validator re-checks anyway. Constraining the prompt is a convenience; the validator is the
-    guarantee — a model can always emit a name that was never in its enum.
+    The model is only offered columns that would pass validation. The validator re-checks anyway,
+    since a model can emit a name that was never in its enum.
     """
     roles = {column["name"]: column for column in profile["columns"]}
     schemas: list[dict[str, Any]] = []

@@ -1,19 +1,17 @@
-"""
-call_cap.py — a hard ceiling on how many tool calls one agent run may attempt.
-Exists because looping is an agent's default failure mode, and CLAUDE.md requires a limit that
-cannot be quietly ignored: spend() RAISES CallCapExceeded instead of returning False, so there is no
-branch a caller can forget to write. Every attempt is charged, including calls the validator rejects.
+"""Hard ceiling on the number of tool calls an agent run may attempt.
+
+spend() raises CallCapExceeded when the budget is exhausted. Every attempt is charged,
+including calls the validator rejects.
 """
 
 from __future__ import annotations
 
-# A budget that fits a report: enough calls to profile, follow two or three leads and stratify one
-# of them, but not enough to wander. Day 3 can pass its own value; this is the default.
+# Default tool-call budget for a run; callers may pass their own.
 DEFAULT_MAX_CALLS = 25
 
 
 class CallCapExceeded(RuntimeError):
-    """Raised the moment an agent asks for one more call than its budget allows."""
+    """Raised when an agent attempts more calls than its budget allows."""
 
     def __init__(self, limit: int, attempted: int) -> None:
         self.limit = limit
@@ -24,13 +22,7 @@ class CallCapExceeded(RuntimeError):
 
 
 class CallCap:
-    """A one-way counter. It only goes up, and it stops the run by raising when it hits the ceiling.
-
-    There is deliberately no reset() and no setter for `used`: a cap you can rewind is not a cap, and
-    a new run should construct a new CallCap. The counter is private, so the guarantee holds against
-    a caller who forgets to check — not against one who reaches into `_used`, which Python cannot
-    prevent and which would be a deliberate act rather than an oversight.
-    """
+    """Counter with a fixed ceiling. Has no reset; construct a new instance per run."""
 
     __slots__ = ("_limit", "_used")
 
@@ -44,21 +36,21 @@ class CallCap:
 
     @property
     def limit(self) -> int:
-        """The ceiling this run was constructed with."""
+        """The configured ceiling."""
         return self._limit
 
     @property
     def used(self) -> int:
-        """Attempts charged so far. Read-only — assigning to it raises AttributeError."""
+        """Attempts charged so far. Read-only."""
         return self._used
 
     @property
     def remaining(self) -> int:
-        """Attempts left before the next spend() raises."""
+        """Attempts left before spend() raises."""
         return self._limit - self._used
 
     def spend(self) -> int:
-        """Charge one attempt and return the new total, or raise CallCapExceeded at the ceiling."""
+        """Charge one attempt and return the new total. Raises CallCapExceeded at the ceiling."""
         if self._used >= self._limit:
             raise CallCapExceeded(self._limit, self._used + 1)
         self._used += 1

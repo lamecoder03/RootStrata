@@ -1,9 +1,7 @@
-"""
-test_llm.py — pins the difference between the two rate limits Groq enforces.
-Exists because treating them alike cost two batches of eval runs: a per-minute limit clears if you
-wait, a per-day one does not, and retrying the latter four times produces "failed after 4 attempts",
-which reads like a flaky network. These tests hold the distinction, the numbers in the message, and
-the preflight that refuses to start a run the day's budget cannot finish.
+"""Tests the difference between the two rate limits Groq enforces.
+
+A per-minute limit clears if you wait and is retried; a per-day one does not and fails
+immediately. Also covers the preflight check and audit log rotation.
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ def rate_limit(body: str) -> RateLimitError:
 
 
 class RecordingClient:
-    """Stands in for the OpenAI SDK client, counting how many times a request was actually sent."""
+    """Stands in for the OpenAI SDK client, counting how many requests were actually sent."""
 
     def __init__(self, error: Exception) -> None:
         self.error = error
@@ -78,7 +76,7 @@ def test_an_unrecognised_shape_is_passed_through_rather_than_swallowed():
 # --- what the retry loop does with each ------------------------------------------------------------
 
 def test_a_daily_limit_fails_on_the_first_attempt_instead_of_backing_off(client):
-    """Four backed-off retries against a daily cap waste 30 seconds to learn nothing."""
+    """A daily limit raises on the first attempt instead of backing off."""
     fake = RecordingClient(rate_limit(TPD_BODY))
     client._client = fake
 
@@ -88,7 +86,7 @@ def test_a_daily_limit_fails_on_the_first_attempt_instead_of_backing_off(client)
 
 
 def test_a_per_minute_limit_is_still_retried(client):
-    """The limit that waiting actually fixes must keep its backoff."""
+    """A per-minute limit keeps its backoff, since waiting clears it."""
     from agent.llm import MAX_RETRIES
 
     fake = RecordingClient(rate_limit(TPM_BODY))
@@ -126,9 +124,11 @@ def test_a_connection_error_is_retried_too(client):
 # --- the preflight ---------------------------------------------------------------------------------
 
 def test_preflight_pads_the_prompt_because_the_daily_gate_measures_the_prompt(client):
-    """Two bugs this pins. A 1-token probe passes on the 509 tokens left at the end of a quota. And
-    reserving output instead — max_completion_tokens=5000 on a one-line prompt — also passes, which
-    was measured against the live API with 1,146 tokens left. Only prompt size is gated daily."""
+    """The preflight pads the prompt, because the daily gate is measured on the prompt.
+
+    A 1-token probe passes on the 509 tokens left at the end of a quota, and reserving output
+    instead (max_completion_tokens=5000 on a one-line prompt) also passes.
+    """
     from agent.llm import PREFLIGHT_TOKENS
 
     seen: dict = {}
@@ -154,7 +154,7 @@ def test_preflight_raises_on_a_daily_limit(client):
 
 
 def test_preflight_tolerates_a_per_minute_limit(client):
-    """A minute-scale limit says nothing about the day's budget, and the run's own retries clear it."""
+    """A per-minute limit during preflight does not block the run, since retries clear it."""
     client._client = RecordingClient(rate_limit(TPM_BODY))
     client.preflight()          # must not raise
 
@@ -162,9 +162,7 @@ def test_preflight_tolerates_a_per_minute_limit(client):
 # --- one audit log is one run -----------------------------------------------------------------
 
 def test_an_existing_audit_log_is_rotated_aside_not_appended_to(tmp_path):
-    """Regression: the audit path is keyed on the dataset, not the run, so re-running the same CSV
-    into the same directory concatenated two runs into one file. A graded store_monthly_sales log
-    held 23 entries from two runs, and anything replaying it reads a 23-call investigation."""
+    """An existing audit log is renamed aside rather than appended to, so one file is one run."""
     import json as _json
     from agent.run import _fresh_audit_path
 

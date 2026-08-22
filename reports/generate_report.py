@@ -1,8 +1,7 @@
-"""
-generate_report.py — turns a finished agent run into the actual deliverable: a markdown findings
-report with one or two supporting charts.
-Exists because a reasoning trace is for debugging and a report is for a reader. It rebuilds the
-evidence by replaying the run's audit log through the toolkit — deterministic, and costing no API.
+"""Turns a finished agent run into a markdown findings report with one or two charts.
+
+Rebuilds the evidence by replaying the run's audit log through the toolkit, which is
+deterministic and involves no API call.
 """
 
 from __future__ import annotations
@@ -14,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Run as a plain script (`python reports/generate_report.py ...`) and sys.path[0] is reports/, so
-# the project packages are not importable. The repo root is one level up and never moves.
+# Run as a plain script, sys.path[0] is reports/ and the project packages are not importable.
+# The repo root is one level up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import matplotlib
@@ -28,9 +27,9 @@ from guardrails.call_cap import CallCap  # noqa: E402
 from guardrails.audit import AuditLog, OUTCOME_ALLOWED  # noqa: E402
 
 # --- palette -------------------------------------------------------------------------------------
-# Diverging blue/red for correlation sign (warm/cool read as opposites, neutral gray at zero), and a
-# single-hue blue ramp for magnitude. Validated: worst pair CVD dE 23.8, normal-vision 31.6, both
-# above the 8/15 floors, both above 3:1 on the light surface.
+# Diverging blue/red for correlation sign, and a single-hue blue ramp for magnitude. Measured:
+# worst pair CVD dE 23.8, normal-vision 31.6, both above the 8/15 floors and above 3:1 on the
+# light surface.
 POSITIVE = "#2a78d6"
 NEGATIVE = "#d03b3b"
 NEUTRAL = "#f0efec"
@@ -42,9 +41,9 @@ GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 SURFACE = "#fcfcfb"
 
-# A report carries one or two charts, never a gallery. See CLAUDE.md: the output is a report.
+# A report carries one or two charts, never a gallery.
 MAX_CHARTS = 2
-# Below this spread a group comparison is not worth a chart - bars all the same length say nothing.
+# Below this spread a group comparison is not worth a chart.
 MIN_INTERESTING_RATIO = 1.5
 
 SECTION_HEADINGS = ("Findings", "Checked and not reported", "Not investigable with this toolkit")
@@ -53,7 +52,7 @@ SECTION_HEADINGS = ("Findings", "Checked and not reported", "Not investigable wi
 # --- reading a finished run ------------------------------------------------------------------------
 
 def read_findings(messages_path: Path) -> str:
-    """The agent's final answer is the last assistant message with real content in it."""
+    """Return the agent's final answer: the last assistant message with content in it."""
     messages = json.loads(messages_path.read_text(encoding="utf-8"))
     for message in reversed(messages):
         if message.get("role") == "assistant" and message.get("content", "").strip():
@@ -83,9 +82,8 @@ def split_sections(findings: str) -> dict[str, str]:
 def replay_evidence(csv_path: Path, audit_path: Path) -> list[dict[str, Any]]:
     """Re-run the calls the audit log recorded, to recover the full result behind each one.
 
-    The audit log stores what was called and a headline, not the whole payload. Replaying is exact
-    because the toolkit is deterministic over a fixed file, and it costs nothing — no model is
-    involved. It also means the report can only ever rest on calls that were actually made.
+    The audit log stores what was called and a headline, not the whole payload. The replay is exact
+    because the toolkit is deterministic over a fixed file, and it involves no model.
     """
     rows = [json.loads(line) for line in
             audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -115,7 +113,7 @@ def audit_summary(audit_path: Path) -> dict[str, Any]:
 # --- charts ----------------------------------------------------------------------------------------
 
 def _style(ax) -> None:
-    """Recessive chrome: the data should be the only thing with weight."""
+    """Apply the shared chart styling."""
     ax.set_facecolor(SURFACE)
     ax.figure.set_facecolor(SURFACE)
     for side in ("top", "right"):
@@ -129,10 +127,9 @@ def _style(ax) -> None:
 
 
 def chart_stratification(item: dict[str, Any], path: Path) -> str:
-    """Subgroup correlations against the pooled one — the chart the whole project is about.
+    """Plot subgroup correlations against the pooled one.
 
-    Bars are coloured by SIGN, because sign is the story: a pooled +0.76 beside three bars at -0.55
-    makes a Simpson's reversal legible in a way the number alone never is.
+    Bars are coloured by sign, so a pooled +0.76 beside three bars at -0.55 reads as a reversal.
     """
     data = item["data"]
     groups = data["groups"]
@@ -147,8 +144,8 @@ def chart_stratification(item: dict[str, Any], path: Path) -> str:
 
     ax.axvline(0, color=AXIS, linewidth=1.0)
     ax.axvline(pooled, color=INK, linewidth=1.4, linestyle="--")
-    # Above the plot, not inside it: anchored to a bar this label lands on top of the bars it is
-    # meant to be compared against, and disappears.
+    # Placed above the plot: anchored to a bar, this label lands on top of the bars it is meant to
+    # be compared against.
     ax.annotate(f"pooled r = {pooled:+.3f}", xy=(pooled, 1.0), xycoords=("data", "axes fraction"),
                 xytext=(0, 6), textcoords="offset points", color=INK, fontsize=9,
                 va="bottom", ha="center", clip_on=False)
@@ -174,10 +171,9 @@ def chart_stratification(item: dict[str, Any], path: Path) -> str:
 
 
 def chart_group_means(item: dict[str, Any], path: Path) -> str:
-    """Mean per group, with the extreme one emphasised and the overall MEDIAN as the reference.
+    """Plot the mean per group, emphasising the extreme one, against the overall median.
 
-    The median, not the mean: a runaway segment is exactly what drags a mean, so drawing the mean as
-    "typical" would hide the thing the chart exists to show.
+    The median rather than the mean, since a runaway segment is exactly what drags a mean.
     """
     data = item["data"]
     groups = sorted(data["groups"], key=lambda g: g["mean"] or 0, reverse=True)
@@ -217,10 +213,9 @@ def chart_group_means(item: dict[str, Any], path: Path) -> str:
 
 
 def pick_charts(evidence: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
-    """Choose at most two charts, preferring whatever carries the most judgment.
+    """Choose at most two charts.
 
-    A confounded stratification outranks everything: it is the finding a reader is most likely to
-    get wrong from prose alone.
+    A confounded stratification outranks everything else.
     """
     stratified = [e for e in evidence
                   if e["function"] == "compute_correlation" and e["data"].get("group_by")
@@ -236,9 +231,9 @@ def pick_charts(evidence: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any
                                     -abs(e["data"]["overall"]["pearson_r"] or 0)))
         chosen.append(("stratification", flagged[0]))
     elif stratified:
-        # Not by strength. The strongest correlation in a file is often the most mechanical one,
-        # and five bars all at 0.995 teach a reader nothing. Pick the widest SPREAD across
-        # subgroups instead - that is where stratification actually carried information.
+        # Ranked by widest spread across subgroups rather than by strength: the strongest
+        # correlation in a file is often the most mechanical one, and five bars all at 0.995 show
+        # nothing.
         stratified.sort(key=lambda e: -((e["data"].get("subgroup_r_max") or 0)
                                         - (e["data"].get("subgroup_r_min") or 0)))
         chosen.append(("stratification", stratified[0]))
@@ -260,7 +255,7 @@ def render_report(
     evidence: list[dict[str, Any]], audit: dict[str, Any], charts: list[tuple[str, str, str]],
     trace_path: Path, cap_limit: int,
 ) -> str:
-    """Assemble the markdown. Findings first, then the evidence they rest on, then provenance."""
+    """Assemble the markdown: findings, then the evidence they rest on, then provenance."""
     counts = audit["counts"]
     out: list[str] = [
         f"# {source} — findings report",
@@ -366,8 +361,8 @@ def build(csv_path: Path, trace_dir: Path, out_dir: Path, stem: str | None = Non
     out_dir.mkdir(parents=True, exist_ok=True)
     findings = read_findings(messages_path)
     sections = split_sections(findings)
-    # An aborted run has no write-up, only a half-finished turn. Say so rather than promoting the
-    # last thing the model happened to be saying into a "Findings" section it never wrote.
+        # An aborted run has no write-up, only a half-finished turn, so it is reported as such
+        # rather than promoted into a "Findings" section the model never wrote.
     if "Findings" not in sections:
         sections = {"Findings": (
             "> **This run did not finish.** It ended before the agent wrote its conclusions, so "

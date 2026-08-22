@@ -1,8 +1,8 @@
-"""
-validator.py — checks a requested (function, arguments) pair against the toolkit allowlist and the
-loaded CSV's real profile: the function must exist, every argument must be declared, and every column
-argument must name a real column whose inferred role and cardinality suit the operation.
-Exists because each file has a different schema, so it raises a ValidationError naming what would work.
+"""Checks a requested (function, arguments) pair against the toolkit allowlist and the loaded
+CSV's profile.
+
+The function must exist, every argument must be declared, and every column argument must name a
+real column whose role and cardinality suit the operation. Rejections name what would work.
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ from typing import Any
 from profiling.profiler import ROLE_EMPTY
 from toolkit.registry import PARAM_COLUMN, PARAM_ENUM, ParamSpec, ToolSpec, get_tool, tool_names
 
-# How many alternatives to name in a rejection message. Bounded for the same reason tool output is:
-# the message is fed back to the model, and a 200-column list is not a helpful correction.
+# Maximum number of alternatives named in a rejection message.
 MAX_SUGGESTIONS = 8
 
 # Error codes, so callers can branch on the kind of failure without parsing prose.
@@ -31,7 +30,7 @@ DUPLICATE_COLUMN = "DUPLICATE_COLUMN"
 
 
 class ValidationError(Exception):
-    """A rejected call. Carries a machine-readable code and, where possible, a usable alternative."""
+    """A rejected call. Carries an error code and, where possible, a usable alternative."""
 
     def __init__(self, code: str, message: str, suggestion: str = "") -> None:
         self.code = code
@@ -42,11 +41,9 @@ class ValidationError(Exception):
 def validate_call(
     profile: dict[str, Any], function_name: str, arguments: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Validate one call against one file's profile; return the normalised arguments or raise.
+    """Validate one call against one file's profile.
 
-    It returns arguments rather than a boolean on purpose. A check whose failure mode is a falsy
-    return value is a check somebody eventually forgets to read; a raise cannot be ignored, and the
-    normalised dict is what the caller needs next anyway.
+    Returns the normalised arguments, or raises ValidationError.
     """
     arguments = dict(arguments or {})
     tool = get_tool(function_name)
@@ -87,7 +84,7 @@ def validate_call(
 
 
 def _reject_undeclared_arguments(tool: ToolSpec, arguments: dict[str, Any]) -> None:
-    """Refuse arguments the spec never declared, so nothing rides in on **kwargs."""
+    """Refuse arguments the spec never declared."""
     unexpected = sorted(set(arguments) - set(tool.param_names))
     if unexpected:
         raise ValidationError(
@@ -100,7 +97,7 @@ def _reject_undeclared_arguments(tool: ToolSpec, arguments: dict[str, Any]) -> N
 def _validate_column(
     tool: ToolSpec, param: ParamSpec, value: Any, columns: dict[str, dict[str, Any]]
 ) -> str:
-    """Check one column argument against the file's actual schema, in existence -> role -> width order."""
+    """Check one column argument in existence -> role -> cardinality order."""
     if not isinstance(value, str):
         raise ValidationError(
             INVALID_ARGUMENT_TYPE,
@@ -134,8 +131,8 @@ def _validate_column(
             else "No column in this file has a suitable role.",
         )
 
-    # The cardinality bound is what stops a *correctly typed* but meaningless argument — a wide
-    # categorical used as a group key. Role says what it is; distinct_count says whether it fits.
+    # The cardinality bound rejects a correctly typed but meaningless argument, such as a wide
+    # categorical used as a group key.
     if param.max_distinct is not None and info["distinct_count"] > param.max_distinct:
         narrower = [
             name for name, c in columns.items()
@@ -153,7 +150,7 @@ def _validate_column(
 
 
 def _validate_enum(tool: ToolSpec, param: ParamSpec, value: Any) -> str:
-    """Check a fixed-choice argument. Case-sensitive: the registry is the spelling authority."""
+    """Check a fixed-choice argument. Case-sensitive."""
     if not isinstance(value, str) or value not in param.choices:
         raise ValidationError(
             INVALID_ENUM_VALUE,
@@ -177,12 +174,12 @@ def _reject_colliding_columns(tool: ToolSpec, resolved: dict[str, Any]) -> None:
 
 
 def profile_name(columns: dict[str, Any]) -> str:
-    """Small helper so the 'unknown column' message says what it searched, not just that it failed."""
+    """Describe the profile in a rejection message, naming what was searched."""
     return f"this file ({len(columns)} columns)"
 
 
 def _bounded(names: list[str]) -> str:
-    """Join a list of column names, truncating so a rejection message stays prompt-sized."""
+    """Join column names, truncating past MAX_SUGGESTIONS."""
     if len(names) <= MAX_SUGGESTIONS:
         return ", ".join(names)
     return f"{', '.join(names[:MAX_SUGGESTIONS])} (+{len(names) - MAX_SUGGESTIONS} more)"

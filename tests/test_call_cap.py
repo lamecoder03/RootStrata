@@ -1,8 +1,7 @@
-"""
-test_call_cap.py — proves the cap is a limit and not a suggestion.
-Exists because CLAUDE.md's guarantee is specifically that the cap *raises*: these tests assert it
-fires at exactly its ceiling, that its counter cannot be assigned or rewound, and that a call the
-validator rejects still costs budget — otherwise an agent looping on invalid calls never terminates.
+"""Tests for the call cap.
+
+Asserts that it raises at exactly its ceiling, that its counter cannot be assigned or rewound,
+and that a call the validator rejects still consumes budget.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ def test_cap_allows_exactly_its_limit_then_raises():
 
 
 def test_spend_returns_an_int_and_never_a_boolean():
-    """The whole design point: failure is an exception, so no caller can 'if' their way past it."""
+    """spend() signals failure by raising, not by returning a falsy value."""
     cap = CallCap(2)
     for _ in range(2):
         value = cap.spend()
@@ -64,7 +63,7 @@ def test_used_counter_is_read_only():
 
 
 def test_cap_exposes_no_way_to_rewind_itself():
-    """A cap you can reset is not a cap. A new run is supposed to construct a new CallCap."""
+    """The cap exposes no reset; a new run constructs a new CallCap."""
     for forbidden in ("reset", "clear", "refund", "set_used", "extend", "increase", "release"):
         assert not hasattr(CallCap, forbidden), f"CallCap should not expose {forbidden}()"
 
@@ -83,7 +82,7 @@ def test_default_limit_is_used_when_none_given():
 
 
 def test_rejected_calls_still_consume_budget(make_toolkit):
-    """An agent that only ever emits invalid calls must still hit the ceiling and stop."""
+    """An agent emitting only invalid calls still reaches the ceiling and stops."""
     toolkit = make_toolkit("marketing", max_calls=4)
     for _ in range(4):
         result = toolkit.call("get_summary_stats", {"column": "region"})  # categorical: always rejected

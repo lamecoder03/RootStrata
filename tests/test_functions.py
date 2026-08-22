@@ -1,8 +1,7 @@
-"""
-test_functions.py — checks the analysis primitives against eval/ground_truth.md and their output bounds.
-Exists because a guardrail around a wrong answer is worthless: these tests pin each planted finding to
-the number the fixtures actually contain, confirm the stratification flags fire on the trap dataset and
-stay quiet on its control, and assert every function truncates and stays JSON-serialisable.
+"""Tests the analysis primitives against eval/ground_truth.md and their output bounds.
+
+Pins each planted finding to the numbers the toolkit reports, and checks that every result stays
+bounded and JSON-serialisable.
 """
 
 from __future__ import annotations
@@ -52,8 +51,8 @@ def test_missingness_is_reported_for_the_column_that_has_it(loaded):
 # --- dataset 2: the outlier segment --------------------------------------------------------------
 
 def test_zscore_is_masked_by_the_very_cluster_it_should_find(loaded):
-    """STORE_07 has 24 extreme months, and their own contribution to the standard deviation hides 6
-    of them. This is why the toolkit offers IQR as well — the test documents the weakness."""
+    """STORE_07 has 24 extreme months, and their contribution to the standard deviation hides 6 of
+    them from the z-score method. IQR is offered for this reason."""
     df, _ = loaded["stores"]
     result = detect_outliers(df, "revenue_usd", method="zscore")
     assert result["n_outliers"] == 18
@@ -64,8 +63,7 @@ def test_zscore_is_masked_by_the_very_cluster_it_should_find(loaded):
 
 
 def test_iqr_catches_the_whole_segment_but_also_the_seasonal_decoy(loaded):
-    """IQR finds all 24 STORE_07 months, and additionally flags November rows from other stores —
-    an anomaly detector alone cannot tell the segment from the seasonality."""
+    """IQR finds all 24 STORE_07 months and additionally flags November rows from other stores."""
     df, _ = loaded["stores"]
     result = detect_outliers(df, "revenue_usd", method="iqr")
     flagged = df[(df.revenue_usd < result["lower_bound"]) | (df.revenue_usd > result["upper_bound"])]
@@ -85,7 +83,7 @@ def test_group_compare_localises_the_outlier_to_its_segment(loaded):
 
 
 def test_the_mean_median_gap_flags_a_distorted_average(loaded):
-    """Pooled mean 77.9k vs median 48.5k: the tell that one segment is dragging the average."""
+    """Pooled mean 77.9k against median 48.5k indicates one segment dragging the average."""
     df, _ = loaded["stores"]
     stats = get_summary_stats(df, "revenue_usd")
     assert stats["mean"] > stats["median"] * 1.5
@@ -107,7 +105,7 @@ def test_sign_reversal_is_detected_on_the_trap_pair(loaded):
 
 
 def test_attenuation_is_detected_on_the_confounded_pair(loaded):
-    """tenure_months has the highest pooled r in the file and collapses to nothing within tiers."""
+    """tenure_months has the highest pooled r in the file and collapses within tiers."""
     df, _ = loaded["training"]
     result = compute_correlation(df, "tenure_months", "output_points", group_by="role_tier")
 
@@ -118,7 +116,7 @@ def test_attenuation_is_detected_on_the_confounded_pair(loaded):
 
 
 def test_the_genuine_relationship_survives_stratification(loaded):
-    """The control. An agent that learns to call everything confounded must fail this one."""
+    """Control case: a genuine relationship survives stratification with both flags false."""
     df, _ = loaded["training"]
     result = compute_correlation(df, "peer_review_score", "output_points", group_by="role_tier")
 
@@ -191,14 +189,14 @@ def test_outlier_examples_are_capped():
 
 
 def test_a_column_with_no_spread_reports_zero_variance_rather_than_outliers():
-    """The guard the test above tripped over: 83% identical values means no usable IQR fence."""
+    """83% identical values means no usable IQR fence, reported as zero variance."""
     result = detect_outliers(pd.DataFrame({"v": [1.0] * 200 + [9_999.0] * 40}), "v", method="iqr")
     assert result["n_outliers"] == 0
     assert "interquartile" in result["note"]
 
 
 def test_groups_too_small_to_correlate_are_skipped_not_guessed():
-    """Three rows is not a correlation. The function reports the skip instead of quoting noise."""
+    """Groups below the minimum size are reported as skipped rather than correlated."""
     rows = []
     for group in ("big", "tiny"):
         n = 40 if group == "big" else 3
@@ -237,7 +235,7 @@ def test_all_null_and_constant_columns_return_a_note_rather_than_raising():
 
 
 def test_direct_calls_with_an_unknown_method_fail_loudly():
-    """The validator normally catches this; the function still refuses, so it is safe on its own."""
+    """The function refuses an unknown method itself, independent of the validator."""
     df = pd.DataFrame({"v": [float(i) for i in range(50)]})
     with pytest.raises(ValueError, match="unknown outlier method"):
         detect_outliers(df, "v", method="isolation_forest")
@@ -246,8 +244,7 @@ def test_direct_calls_with_an_unknown_method_fail_loudly():
 # --- output labelling: a ratio must say what it is a ratio OF -------------------------------------
 
 def test_group_ratios_name_their_denominator(loaded):
-    """Regression: a key called `median_ratio_to_overall`, in a result that also carries
-    `overall_mean`, was read as a ratio to the mean. It is against the median, and now says so."""
+    """Ratio keys name their denominator, so a median ratio is not read against overall_mean."""
     df, _ = loaded["stores"]
     result = group_compare(df, "store_id", "revenue_usd")
 

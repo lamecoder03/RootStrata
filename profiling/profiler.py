@@ -1,8 +1,8 @@
-"""
-profiler.py — reduces any unseen CSV to a compact, JSON-serialisable profile: row count, dtypes,
-missing % per column, an inferred role per column, numeric summary stats and categorical cardinality.
-Exists because the agent must reason about a file it has never seen, and because the guardrail
-allowlist validates tool arguments against this profile — the CSV's runtime schema, read once via pandas.
+"""Reduces any CSV to a compact, JSON-serialisable profile.
+
+Covers row count, dtypes, missing percentage per column, an inferred role per column, numeric
+summary stats and categorical cardinality. The guardrail allowlist validates tool arguments
+against this profile.
 """
 
 from __future__ import annotations
@@ -17,25 +17,24 @@ from typing import Any
 
 import pandas as pd
 
-# --- tuning constants, kept at module level so the heuristics are visible and arguable ---
+# --- tuning constants ---
 
 # A text column counts as a datetime only if this fraction of sampled values parses as one.
 DATETIME_PARSE_THRESHOLD = 0.90
-# ...and only if the values actually look date-ish, so that IDs like "10432" are not "parsed"
-# into the year 10432. This is the guard that stops the most common false positive.
+# ...and only if the values look date-ish, so IDs like "10432" are not read as the year 10432.
 DATETIME_SHAPE_RE = re.compile(r"\d[-/:. ]\d")
 # Number of values sampled when sniffing for datetimes. Bounded so profiling stays cheap.
 DATETIME_SAMPLE_SIZE = 200
-# A text column with more distinct values than this fraction of rows is an identifier, not a
-# grouping key — the agent should never try to "group by" a primary key.
+# A text column with more distinct values than this fraction of rows is treated as an identifier
+# rather than a grouping key.
 IDENTIFIER_UNIQUENESS_THRESHOLD = 0.95
 # Below this row count, uniqueness is too noisy to call something an identifier.
 IDENTIFIER_MIN_ROWS = 20
 # How many of the most frequent values to show for a categorical column.
 TOP_VALUES_KEPT = 5
 
-# Roles the profiler can assign. The toolkit will later use these to decide which functions are
-# even applicable to a column (e.g. correlation needs two NUMERIC columns).
+# Roles the profiler can assign. The toolkit uses these to decide which functions apply to a
+# column (e.g. correlation needs two NUMERIC columns).
 ROLE_NUMERIC = "numeric"
 ROLE_BOOLEAN = "boolean"
 ROLE_DATETIME = "datetime"
@@ -45,7 +44,7 @@ ROLE_EMPTY = "empty"
 
 
 def load_csv(path: str | Path) -> pd.DataFrame:
-    """Read a CSV into a DataFrame, failing loudly and specifically rather than returning None."""
+    """Read a CSV into a DataFrame, raising a specific error on failure."""
     csv_path = Path(path)
     if not csv_path.is_file():
         raise FileNotFoundError(f"No CSV at {csv_path}")
@@ -68,14 +67,14 @@ def _py(value: Any) -> Any:
 
 
 def _looks_like_datetime(series: pd.Series) -> bool:
-    """Sniff whether a text column is really dates, using a shape guard then a real parse."""
+    """Sniff whether a text column holds dates, using a shape guard then a real parse."""
     sample = series.dropna().astype(str).head(DATETIME_SAMPLE_SIZE)
     if sample.empty:
         return False
     if sample.str.contains(DATETIME_SHAPE_RE).mean() < DATETIME_PARSE_THRESHOLD:
         return False
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # pandas is chatty about inferring per-element formats
+        warnings.simplefilter("ignore")  # pandas warns when inferring per-element formats
         parsed = pd.to_datetime(sample, errors="coerce")
     return bool(parsed.notna().mean() >= DATETIME_PARSE_THRESHOLD)
 
@@ -100,9 +99,9 @@ def _infer_role(series: pd.Series) -> str:
 
 
 def _numeric_stats(series: pd.Series) -> dict[str, Any]:
-    """Summary stats for one numeric column. All-null columns return Nones, not exceptions."""
-    # astype(float) matters: bool columns survive to_numeric as bools, and quantile() on a bool
-    # dtype raises rather than treating True/False as 1/0.
+    """Summary stats for one numeric column. All-null columns return Nones."""
+    # astype(float) is required: bool columns survive to_numeric as bools, and quantile() raises
+    # on a bool dtype.
     values = pd.to_numeric(series, errors="coerce").dropna().astype(float)
     if values.empty:
         return {k: None for k in ("mean", "std", "min", "p25", "median", "p75", "max")}
@@ -118,7 +117,7 @@ def _numeric_stats(series: pd.Series) -> dict[str, Any]:
 
 
 def _categorical_stats(series: pd.Series) -> dict[str, Any]:
-    """Cardinality detail — the most common values are what the agent needs to pick a group key."""
+    """Cardinality detail and the most common values for one categorical column."""
     counts = series.dropna().astype(str).value_counts()
     return {
         "top_values": [
@@ -165,13 +164,13 @@ def profile_dataframe(df: pd.DataFrame, name: str = "<dataframe>") -> dict[str, 
 
 
 def profile_csv(path: str | Path) -> dict[str, Any]:
-    """Load a CSV and profile it. This is the entry point everything else should call."""
+    """Load a CSV and profile it. The entry point for other modules."""
     csv_path = Path(path)
     return profile_dataframe(load_csv(csv_path), name=csv_path.name)
 
 
 def format_profile(profile: dict[str, Any]) -> str:
-    """Render a profile as compact text — readable by a human and cheap to put in a prompt."""
+    """Render a profile as compact text for a prompt or console."""
     lines = [
         f"DATASET: {profile['source']}",
         "rows={row_count}  columns={column_count}  duplicate_rows={duplicate_row_count}".format(

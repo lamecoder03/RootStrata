@@ -1,8 +1,7 @@
-"""
-run.py — the CLI: `python -m agent.run <csv> [--focus "..."]`.
-Exists to wire the four pieces together in one readable place — load and profile the CSV, build the
-guarded toolkit around it, drive the planning loop, write the trace — and to stream progress to the
-terminal while it runs, so a long run is watchable rather than a silent wait for a file.
+"""CLI entry point: `python -m agent.run <csv> [--focus "..."]`.
+
+Loads and profiles the CSV, builds the guarded toolkit around it, drives the planning loop,
+writes the trace, and streams progress to the terminal while it runs.
 """
 
 from __future__ import annotations
@@ -32,10 +31,10 @@ def _wrap(text: str, prefix: str = "    ") -> str:
 
 
 def make_reporter(quiet: bool):
-    """Stream the run to the terminal as it happens. Events come from the loop, not from guessing.
+    """Build a callback that streams run events to the terminal.
 
-    Every print is wrapped: the console is a progress display, and a display problem must never
-    destroy a run that has already spent real API budget. The trace file is the durable record.
+    Every print is wrapped: a console failure must not destroy a run that has spent API budget.
+    The trace file is the durable record.
     """
 
     def report(event: str, payload: Any) -> None:
@@ -79,14 +78,10 @@ def make_reporter(quiet: bool):
 def _fresh_audit_path(path: Path) -> Path:
     """Return `path`, first moving any existing audit log aside so one file is always one run.
 
-    The audit log is opened in append mode on purpose — nothing already written may be edited or
-    dropped. But the filename is keyed on the dataset, not the run, so re-running the same CSV into
-    the same directory silently concatenated two runs into one file. That happened: a graded
-    `store_monthly_sales` log held 23 entries from two separate runs, and anything replaying it — the
-    report generator included — would have read them as a single 23-call investigation.
-
-    Rotating rather than truncating keeps the append-only guarantee intact. The old run is renamed
-    with the timestamp of its last entry, so it stays inspectable and cannot be confused for this one.
+    The log is opened in append mode, and the filename is keyed on the dataset rather than the run,
+    so re-running the same CSV into the same directory would otherwise concatenate two runs into
+    one file. Rotating rather than truncating keeps the append-only guarantee: the old log is
+    renamed with the timestamp of its last entry.
     """
     if not path.exists():
         return path
@@ -98,7 +93,7 @@ def _fresh_audit_path(path: Path) -> Path:
             last = json.loads(lines[-1]).get("timestamp", "")
             stamp = last.replace(":", "").replace("-", "").replace(".", "")[:15] or "previous"
     except (OSError, ValueError, json.JSONDecodeError):
-        pass                      # an unreadable old log is still worth keeping, just less precisely
+        pass                      # an unreadable old log is still kept, just named less precisely
 
     archived = path.with_name(f"{path.stem}.{stamp}{path.suffix}")
     suffix = 2
@@ -141,16 +136,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Model output is arbitrary Unicode and a Windows console defaults to cp1252, which raises on
-    # something as ordinary as a narrow no-break space. Replace rather than raise: losing a
-    # character from the live view is nothing, losing a paid-for run to a print() is not.
+    # characters as ordinary as a narrow no-break space. Replace rather than raise.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
 
-    # The call cap is meant to be the budget that bites. Turns only backstop a non-converging loop,
-    # so they scale with it rather than sitting at a fixed number below it.
+    # The call cap is the binding budget. Turns only backstop a non-converging loop, so they scale
+    # with the cap rather than sitting at a fixed number below it.
     max_turns = args.max_turns or max(MAX_TURNS, args.max_calls + TURN_HEADROOM)
 
     csv_path = Path(args.csv_path)
@@ -164,8 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    # Ask about the day's budget before creating an audit log or writing anything: a run that dies
-    # on quota three turns in leaves a trace that looks like a result and is not one.
+    # Check the day's budget before creating an audit log or writing anything, so a run that dies
+    # on quota does not leave a partial trace behind.
     if not args.skip_preflight:
         try:
             model.preflight()
@@ -197,10 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         context_budget=args.context_budget,
     )
 
-    # A run that died before its first turn has nothing to record, and writing it anyway drops a
-    # file named like a result into the folder grading reads from. Everything the attempt taught is
-    # in run.error, which is printed. A run with even one turn keeps its trace: losing ten good
-    # calls to a rate limit is the failure this whole path exists to prevent.
+    # A run that died before its first turn has nothing to record; what it produced is in
+    # run.error, which is printed. A run with at least one turn keeps its trace.
     paths = write_trace(run, trace_dir, stem) if run.turns else {}
     counts = run.audit.counts_by_outcome()
     print(f"\n{'=' * WIDTH}")

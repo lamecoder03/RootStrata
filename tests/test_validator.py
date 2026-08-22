@@ -1,8 +1,7 @@
-"""
-test_validator.py — proves the allowlist is enforced against each file's real schema, not a fixed list.
-Exists because "validated against the runtime schema" is the load-bearing claim of this project: every
-toolkit function gets at least one semantically-invalid call rejected here, and the final tests show
-the same column name accepted in one file and refused in another.
+"""Tests that the allowlist is enforced against each file's real schema rather than a fixed list.
+
+Covers the calls that must pass, one semantically invalid call per toolkit function, structural
+rejections, and the cardinality bounds that role checks alone do not catch.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from toolkit.registry import MAX_GROUP_KEY_DISTINCT, tool_names
 
 
 def _reject(profile, function, arguments) -> ValidationError:
-    """Assert a call is refused and hand back the error, so each test can check the code it expects."""
+    """Assert a call is refused and return the error, so a test can check the code it expects."""
     with pytest.raises(ValidationError) as excinfo:
         validate_call(profile, function, arguments)
     return excinfo.value
@@ -38,7 +37,7 @@ def _reject(profile, function, arguments) -> ValidationError:
 # --- the calls that must be allowed --------------------------------------------------------------
 
 def test_every_tool_has_a_legitimate_call_that_passes(profiles):
-    """Positive controls. A validator that rejects everything would pass all the tests below."""
+    """Positive controls: a validator that rejected everything would pass the tests below."""
     marketing, training, stores = profiles["marketing"], profiles["training"], profiles["stores"]
 
     assert validate_call(marketing, "get_summary_stats", {"column": "ad_spend_usd"}) == {
@@ -125,7 +124,7 @@ def test_group_compare_refuses_a_categorical_value_column(profiles):
 
 
 def test_value_counts_refuses_a_column_with_too_many_distinct_values(profiles):
-    """revenue_usd is the right *role* and still a nonsense argument: 288 rows, 288 distinct values."""
+    """revenue_usd has the right role and is still invalid: 288 rows, 288 distinct values."""
     error = _reject(profiles["stores"], "value_counts", {"column": "revenue_usd"})
     assert error.code == COLUMN_TOO_WIDE
     assert "288" in str(error)
@@ -157,7 +156,7 @@ def test_a_near_miss_column_name_gets_a_suggestion(profiles):
 
 
 def test_undeclared_arguments_are_refused(profiles):
-    """Nothing rides in on **kwargs: an argument the spec never declared is a rejected call."""
+    """An argument the spec never declared is a rejected call."""
     error = _reject(
         profiles["marketing"], "get_summary_stats", {"column": "ad_spend_usd", "limit": 10_000}
     )
@@ -197,8 +196,8 @@ def test_stratifying_a_column_by_itself_is_refused(profiles):
 # --- role is not enough: cardinality does real work -----------------------------------------------
 
 def test_a_wide_categorical_is_refused_as_a_group_key():
-    """Correct role, wrong shape. 200 distinct values in 260 rows is under the identifier threshold,
-    so only the cardinality bound catches it."""
+    """200 distinct values in 260 rows is under the identifier threshold, so only the cardinality
+    bound catches it."""
     df = pd.DataFrame(
         {
             "ticket_ref": [f"T-{i % 200}" for i in range(260)],
@@ -214,7 +213,7 @@ def test_a_wide_categorical_is_refused_as_a_group_key():
 
 
 def test_a_low_cardinality_numeric_flag_is_accepted_as_a_group_key(profiles):
-    """The mirror image: promo_flag is numeric, but with 2 distinct values it is a real grouping."""
+    """promo_flag is numeric, but with 2 distinct values it is a valid grouping key."""
     resolved = validate_call(
         profiles["stores"], "group_compare", {"group_col": "promo_flag", "value_col": "revenue_usd"}
     )
@@ -240,7 +239,7 @@ def test_the_same_argument_is_valid_in_one_file_and_unknown_in_another(profiles)
 
 
 def test_the_same_column_name_can_pass_in_one_file_and_fail_on_role_in_another():
-    """A fixed allowlist cannot express this. Only a per-file profile can."""
+    """The same column name passes in one file and fails on role in another."""
     numeric = profile_dataframe(
         pd.DataFrame({"score": [float(i % 50) for i in range(60)]}), "numeric.csv"
     )
@@ -255,7 +254,7 @@ def test_the_same_column_name_can_pass_in_one_file_and_fail_on_role_in_another()
 
 
 def test_validate_call_returns_arguments_and_never_a_boolean(profiles):
-    """A check whose failure mode is a falsy return is a check somebody forgets to read."""
+    """validate_call returns normalised arguments and signals failure by raising."""
     resolved = validate_call(profiles["marketing"], "value_counts", {"column": "region"})
     assert isinstance(resolved, dict)
     assert not isinstance(resolved, bool)

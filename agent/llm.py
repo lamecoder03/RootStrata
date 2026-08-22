@@ -1,8 +1,7 @@
-"""
-llm.py — thin adapter over Groq's OpenAI-compatible chat completions endpoint.
-Exists so the planning loop depends on one small interface it can be stubbed against in tests, rather
-than on the SDK. Tool schemas come from registry.to_openai_tools(profile), narrowed to the columns of
-whichever CSV is loaded, so the model is only ever offered arguments that exist in this file.
+"""Adapter over Groq's OpenAI-compatible chat completions endpoint.
+
+Gives the planning loop one small interface that can be stubbed in tests. Tool schemas come from
+registry.to_openai_tools(profile), narrowed to the columns of the loaded CSV.
 """
 
 from __future__ import annotations
@@ -22,38 +21,32 @@ from toolkit.registry import to_openai_tools
 
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-# Low but not zero. This is analytic judgment, not brainstorming: we want the same file to produce
-# the same reading twice, while leaving the model room to phrase a conclusion rather than a template.
+# Low but not zero: the same file should produce the same reading twice.
 DEFAULT_TEMPERATURE = 0.2
-# gpt-oss exposes a reasoning budget on Groq. "medium" is enough to plan and to notice a reversal
-# without spending the whole latency budget thinking about column names.
+# gpt-oss exposes a reasoning budget on Groq.
 DEFAULT_REASONING_EFFORT = "medium"
 
 MAX_RETRIES = 4
 BACKOFF_SECONDS = 2.0
-# How big a prompt preflight() sends. Measured, twice: real requests in a run cost 3,200-5,700
-# tokens, so the first value here (2,000) was under-sized — it passed, spent the 2,000 it had just
-# proved, and the run's actual first request was refused at turn 0 for 3,179. A probe spends
-# exactly what it proves, so it has to ask for more than one real turn, not less.
+# Prompt size preflight() sends. Real requests in a run cost 3,200-5,700 tokens, so the probe must
+# ask for more than one real turn: it spends exactly what it proves.
 PREFLIGHT_TOKENS = 6_000
 
 
 class MissingCredentials(RuntimeError):
-    """Raised when no GROQ_API_KEY is available, with the fix rather than a stack trace."""
+    """Raised when no GROQ_API_KEY is available."""
 
 
 class DailyQuotaExhausted(RuntimeError):
-    """The per-day token allowance is gone. Distinct from a per-minute limit, which waiting fixes.
+    """The per-day token allowance is gone.
 
-    Retrying this is not slow, it is wrong: four backed-off attempts against a daily cap fail four
-    times and then report "failed after 4 attempts", which reads like a flaky network. Worse, a run
-    that starts on a nearly empty budget dies partway and leaves a trace that looks like evidence.
+    Distinct from a per-minute limit, which waiting fixes. Raised immediately rather than retried.
     """
 
 
 @dataclass(frozen=True)
 class ToolCall:
-    """One function call the model asked for. `raw_arguments` is kept so the trace is faithful."""
+    """One function call the model asked for. `raw_arguments` is kept for the trace."""
 
     id: str
     name: str
@@ -64,7 +57,7 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class LLMResponse:
-    """One assistant turn: its visible answer, its reasoning if the model exposes it, its calls."""
+    """One assistant turn: its visible answer, its reasoning if exposed, and its tool calls."""
 
     content: str = ""
     reasoning: str = ""
@@ -75,7 +68,7 @@ class LLMResponse:
 
 
 class ChatModel(Protocol):
-    """The whole surface the planning loop needs. A stub implementing this can drive it offline."""
+    """The interface the planning loop depends on. A stub implementing this can drive it offline."""
 
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
@@ -85,8 +78,8 @@ class ChatModel(Protocol):
 def assistant_message(response: LLMResponse) -> dict[str, Any]:
     """Rebuild the assistant message to append to the transcript.
 
-    Reconstructed from our own dataclass rather than kept as an SDK object, so a stubbed model
-    produces byte-identical transcripts to a real one.
+    Reconstructed from the dataclass rather than the SDK object, so a stubbed model produces
+    identical transcripts to a real one.
     """
     message: dict[str, Any] = {"role": "assistant", "content": response.content or ""}
     if response.tool_calls:
@@ -104,10 +97,9 @@ def assistant_message(response: LLMResponse) -> dict[str, Any]:
 def tools_for_profile(profile: dict[str, Any]) -> list[dict[str, Any]]:
     """Tool schemas for one file, with unsatisfiable parameters removed.
 
-    to_openai_tools() narrows every column parameter to the columns that would pass validation. If
-    that leaves an *optional* parameter with no candidates the parameter is dropped, and if it
-    leaves a *required* one empty the whole tool is dropped: offering a call that cannot be made is
-    an invitation to waste budget discovering that.
+    to_openai_tools() narrows every column parameter to the columns that would pass validation. An
+    optional parameter left with no candidates is dropped; a required one left empty drops the
+    whole tool.
     """
     usable: list[dict[str, Any]] = []
     for schema in to_openai_tools(profile):
@@ -138,9 +130,8 @@ class GroqClient:
         temperature: float = DEFAULT_TEMPERATURE,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
     ) -> None:
-        # Explicit path, not load_dotenv()'s default: the no-argument form finds the .env by
-        # inspecting the caller's stack frame, which raises outright when this is imported from a
-        # REPL or a piped script. The repo root is two levels up from this file and never moves.
+        # Explicit path rather than load_dotenv()'s default, which inspects the caller's stack
+        # frame and raises when imported from a REPL or a piped script.
         load_dotenv(Path(__file__).resolve().parent.parent / ".env")
         key = api_key or os.environ.get("GROQ_API_KEY")
         if not key:
@@ -155,23 +146,14 @@ class GroqClient:
         self._client = OpenAI(api_key=key, base_url=self.base_url)
 
     def preflight(self, needed_tokens: int = PREFLIGHT_TOKENS) -> None:
-        """Check there is room for a real turn before starting a run. Raises DailyQuotaExhausted.
+        """Check there is room for a real turn before starting a run.
 
-        The naive check — send a tiny request and see if it works — is worse than useless: it passes
-        on the few hundred tokens left at the end of a quota and reports "quota is back", which is
-        how two batches of eval runs came to die partway through. A large `max_completion_tokens`
-        does not fix it either: the daily gate is measured on the PROMPT, so a one-line prompt is
-        waved through however much output it reserves. That was measured, not assumed — a probe
-        reserving 5,000 tokens passed with 1,146 left in the day.
+        Raises DailyQuotaExhausted. The prompt itself is padded to the size of a real turn, because
+        the daily gate is measured on the prompt: a one-line prompt is admitted however much output
+        it reserves.
 
-        So the prompt itself is padded to the size of a real turn. The cost is honest: about
-        `needed_tokens` when it passes, nothing when it fails, since a refused request is not
-        charged.
-
-        Two limits are inherent and worth stating rather than papering over. It answers whether ONE
-        turn fits, not whether a whole run will — no probe can answer that without spending a run.
-        And it *spends what it proves*: passing means at least `needed_tokens` were free a moment
-        ago, and they are not free now. That is why the default asks for more than a single turn.
+        Two limits: it answers whether one turn fits, not whether a whole run will, and it spends
+        what it proves. Hence a default larger than a single turn.
         """
         padding = "the quick brown fox jumps over the lazy dog. " * (needed_tokens // 10)
         try:
@@ -188,7 +170,7 @@ class GroqClient:
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
-        """One chat completion, with retries on the failures that are worth retrying."""
+        """One chat completion, retrying the failures worth retrying."""
         request: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -206,8 +188,7 @@ class GroqClient:
                 completion = self._client.chat.completions.create(**request)
                 return _parse_completion(completion)
             except BadRequestError as exc:
-                # Not every deployment accepts reasoning_effort. Drop it once and try again rather
-                # than failing a whole run over an optional parameter.
+                    # Not every deployment accepts reasoning_effort. Drop it once and retry.
                 if self._reasoning_effort and "reasoning" in str(exc).lower():
                     self._reasoning_effort = None
                     request.pop("reasoning_effort", None)
@@ -215,8 +196,8 @@ class GroqClient:
                     continue
                 raise
             except RateLimitError as exc:
-                # Per-minute limits are what backoff is for. A per-day limit is not: it will still
-                # be there in eight seconds, so say so once and stop.
+                    # Backoff fixes a per-minute limit. A per-day limit will still be there in
+                    # eight seconds, so report it once and stop.
                 if _is_daily_quota(exc):
                     raise DailyQuotaExhausted(_quota_message(exc)) from exc
                 last_error = exc
@@ -232,17 +213,15 @@ class GroqClient:
 
 
 def _is_daily_quota(exc: Exception) -> bool:
-    """Groq distinguishes the two limits only in the error text, so that is what we read."""
+    """Detect a daily quota error. Groq distinguishes the two limits only in the error text."""
     text = str(exc).lower()
     return "tokens per day" in text or "(tpd)" in text
 
 
 def _quota_message(exc: Exception) -> str:
-    """Pull the numbers out of Groq's message so the caller learns how short it is, not just that.
+    """Pull the limit, usage and reset numbers out of Groq's error message.
 
-    The raw error is a JSON blob inside a Python exception string; the three numbers that decide
-    whether waiting is worth it are buried in prose. Falls back to the whole text if the shape
-    changes, because a slightly ugly message beats a swallowed one.
+    Falls back to the whole text if the message shape changes.
     """
     text = str(exc)
     numbers = re.search(r"Limit (\d+), Used (\d+), Requested (\d+)", text)
@@ -259,7 +238,7 @@ def _quota_message(exc: Exception) -> str:
 
 
 def _parse_completion(completion: Any) -> LLMResponse:
-    """Turn an SDK completion into our own dataclass, tolerating malformed tool arguments."""
+    """Turn an SDK completion into an LLMResponse, tolerating malformed tool arguments."""
     choice = completion.choices[0]
     message = choice.message
 

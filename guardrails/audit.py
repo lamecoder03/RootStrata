@@ -1,8 +1,7 @@
-"""
-audit.py — an append-only record of every tool call the agent attempts, allowed or not.
-Exists because an allowlist is only trustworthy if refusals are visible: a log of successes alone
-hides what the agent tried to do. Entries are frozen dataclasses handed out as a tuple and mirrored
-to a JSONL file opened in append mode, so nothing already written can be edited or dropped.
+"""Append-only record of every tool call the agent attempts, allowed or not.
+
+Entries are frozen dataclasses handed out as a tuple and mirrored to a JSONL file opened in
+append mode.
 """
 
 from __future__ import annotations
@@ -20,18 +19,13 @@ OUTCOME_ERROR = "error"         # it ran and blew up
 
 OUTCOMES = (OUTCOME_ALLOWED, OUTCOME_REJECTED, OUTCOME_CAPPED, OUTCOME_ERROR)
 
-# Detail text is truncated before it is stored: a log line should be readable, and a pandas
-# traceback pasted whole would drown the record of what was actually attempted.
+# Detail text is truncated before it is stored to keep log lines readable.
 MAX_DETAIL_CHARS = 400
 
 
 @dataclass(frozen=True)
 class AuditEntry:
-    """One attempted call. Frozen, and arguments are held as JSON text rather than a live dict.
-
-    The JSON-text detail matters: a frozen dataclass still lets you mutate a dict *inside* it, so
-    storing the arguments as a string is what actually makes an entry unchangeable after the fact.
-    """
+    """One attempted call. Frozen, with arguments held as JSON text rather than a live dict."""
 
     seq: int
     timestamp: str
@@ -44,7 +38,7 @@ class AuditEntry:
 
     @property
     def arguments(self) -> dict[str, Any]:
-        """A fresh copy every read, so a caller mutating what it got cannot alter the record."""
+        """The call's arguments, as a fresh copy on every read."""
         return json.loads(self.arguments_json)
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,9 +60,8 @@ class AuditEntry:
 class AuditLog:
     """Append-only call log, optionally mirrored to a JSONL file.
 
-    The class exposes no way to delete, clear, reorder or overwrite an entry — that omission is the
-    feature. `entries` returns a tuple of frozen records, so a caller cannot reach through the
-    accessor and edit history either.
+    Exposes no way to delete, clear, reorder or overwrite an entry. `entries` returns a tuple
+    of frozen records.
     """
 
     __slots__ = ("_entries", "_path")
@@ -88,7 +81,7 @@ class AuditLog:
         duration_ms: float | None = None,
         result_summary: str = "",
     ) -> AuditEntry:
-        """Append one attempt. Returns the entry so callers can reference its sequence number."""
+        """Append one attempt and return the entry, which carries its sequence number."""
         if outcome not in OUTCOMES:
             raise ValueError(f"unknown audit outcome {outcome!r}; expected one of {OUTCOMES}")
 
@@ -96,8 +89,7 @@ class AuditLog:
             seq=len(self._entries) + 1,
             timestamp=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             function=function,
-            # default=str so an unserialisable argument is recorded rather than crashing the log —
-            # failing to write the audit trail would be a worse outcome than an imprecise entry.
+            # default=str records an unserialisable argument rather than raising.
             arguments_json=json.dumps(arguments or {}, sort_keys=True, default=str),
             outcome=outcome,
             detail=_truncate(detail),
@@ -107,15 +99,14 @@ class AuditLog:
         self._entries.append(entry)
 
         if self._path is not None:
-            # "a" only. Never "w" — opening for write would truncate the history this file exists
-            # to preserve, and one accidental mode change would silently undo the whole guarantee.
+            # Append mode only: "w" would truncate the existing log.
             with self._path.open("a", encoding="utf-8") as handle:
                 handle.write(entry.to_json() + "\n")
         return entry
 
     @property
     def entries(self) -> tuple[AuditEntry, ...]:
-        """Every attempt, oldest first, as an immutable tuple of immutable records."""
+        """Every attempt, oldest first, as an immutable tuple."""
         return tuple(self._entries)
 
     @property
@@ -126,16 +117,16 @@ class AuditLog:
         return len(self._entries)
 
     def counts_by_outcome(self) -> dict[str, int]:
-        """How many attempts landed in each outcome — the one-line summary of a run's behaviour."""
+        """How many attempts landed in each outcome."""
         counts = {outcome: 0 for outcome in OUTCOMES}
         for entry in self._entries:
             counts[entry.outcome] += 1
         return counts
 
     def format_table(self, width: int = 118) -> str:
-        """Render the log as an aligned table for a human reading a run after the fact."""
+        """Render the log as an aligned table."""
         # Fixed columns: seq(3) + gap(2) + outcome(9) + gap(1) + function(20) + gap(1)
-        #              + arguments(34) + gap(1). Whatever is left goes to the detail text.
+        #              + arguments(34) + gap(1). The remainder goes to the detail text.
         fixed = 71
         detail_width = max(20, width - fixed)
         header = f"{'#':>3}  {'outcome':<9} {'function':<20} {'arguments':<34} detail"
@@ -156,6 +147,6 @@ class AuditLog:
 
 
 def _truncate(text: str) -> str:
-    """Keep log lines bounded; mark anything cut so a reader knows the entry is abbreviated."""
+    """Truncate text to `limit`, marking anything cut."""
     text = str(text or "")
     return text if len(text) <= MAX_DETAIL_CHARS else text[: MAX_DETAIL_CHARS - 3] + "..."

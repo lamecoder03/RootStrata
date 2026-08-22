@@ -1,8 +1,7 @@
-"""
-planner_loop.py — the hand-written planning loop: hand the model the file's profile up front, let it
-plan investigations, run each through the guarded toolkit, feed results back, stop when it says so.
-Exists because this loop is the explainable part of the project — no framework, so every message, every
-rejection fed back for self-correction and every stopping condition is visible in one file.
+"""The planning loop.
+
+Hands the model the file's profile up front, lets it plan investigations, runs each through the
+guarded toolkit, feeds results back, and stops when the model says so or a ceiling is reached.
 """
 
 from __future__ import annotations
@@ -17,46 +16,37 @@ from guardrails.call_cap import CallCap, CallCapExceeded
 from guardrails.executor import GuardedToolkit, call_signature
 from profiling.profiler import format_profile
 
-# LLM round trips, which is not the same budget as the tool-call cap: one turn can request several
-# calls, and a turn that only thinks costs no calls at all. Both ceilings are needed.
+# LLM round trips. Not the same budget as the tool-call cap: one turn can request several calls,
+# and a turn that only thinks costs none, so both ceilings are needed.
 #
-# This is a backstop against a loop that never converges, NOT the real budget - the call cap is.
-# In practice the model issues about one call per turn, so a turn ceiling near the call cap makes
-# turns the binding constraint and cuts investigations short for the wrong reason. run.py therefore
-# defaults it to comfortably above the call budget; this value only applies when nothing else does.
+# This is a backstop against a loop that never converges, not the real budget. run.py defaults it
+# to comfortably above the call cap; this value applies only when nothing else does.
 MAX_TURNS = 14
 # Headroom over the call cap: the plan turn, the final write-up, and a few thinking turns.
 TURN_HEADROOM = 6
 
-# The transcript grows by a full tool result every turn, and Groq's free tier refuses a single
+# The transcript grows by a full tool result every turn, and Groq's free tier refuses any single
 # request larger than its whole per-minute token allowance (8000). So the loop manages its own
 # context: older tool payloads are compacted to their headline numbers, and if that is not enough,
 # the oldest exchanges are replaced by a note saying what ran.
 #
-# The number is calibrated, not guessed: the run that hit the limit was refused at 8074 real tokens
-# and this estimator scored that same transcript around 5450, so char/4 under-counts by roughly
-# 1.48x. That ratio is a worst case — it was measured on an untrimmed transcript of dense JSON
-# payloads, which tokenise far worse than the English prose that dominates a trimmed one.
-#
-# 4900 estimated is therefore about 7250 real at worst, still under the 8000 cap with room for a
-# reasoning-heavy completion. It was raised from 4400 when the Day 5 prompt rules pushed the
-# un-droppable floor (see context_floor) above the old budget: at that point trimming had nothing
-# left it was allowed to drop, and every request would have gone out over budget. The budget covers
-# the whole request — messages AND the tool schemas, which are resent every turn.
+# The estimator under-counts real tokens by roughly 1.48x (measured on a JSON-dense transcript,
+# which is the worst case), so 4900 estimated is about 7250 real, under the 8000 cap with room for
+# a reasoning-heavy completion. The budget covers the whole request, including the tool schemas,
+# which are re-sent every turn.
 CONTEXT_TOKEN_BUDGET = 4900
-# What must stay free for live tool results after the un-droppable floor is paid for. Below this the
-# agent is reasoning entirely from compacted headlines, which is not worth spending a run on.
+# What must stay free for live tool results once the un-droppable floor is paid for.
 MIN_RESULT_HEADROOM = 400
-# The written plan is protected too — it is an assistant message with no tool_calls, so it sits in
-# the prefix trimming never touches. It is model-written, so the floor budgets a nominal size.
+# The written plan is protected too: it is an assistant message with no tool_calls, so it sits in
+# the prefix trimming never touches. Being model-written, it is budgeted at a nominal size.
 PLAN_ALLOWANCE = 400
-# The most recent results stay in full — those are the ones the next decision depends on.
+# The most recent results stay in full.
 KEEP_FULL_RESULTS = 3
-# Rough enough: this only decides *when* to compact, and compacting early is cheap.
+# Rough estimate: this only decides when to compact.
 CHARS_PER_TOKEN = 4
 
-# What the five functions genuinely cannot do. Stated in the prompt so the agent declares a gap
-# instead of inventing an answer — the time-series absence is the one it will hit most often.
+# What the five functions cannot do. Stated in the prompt so the agent declares a gap rather than
+# inventing an answer.
 TOOLKIT_LIMITATIONS = """\
 - No time-series or trend analysis: nothing for value-over-time, seasonality, change points or
   forecasting. Grouping by a date column gives per-period averages - a comparison, not a trend.
@@ -237,7 +227,7 @@ Questions this file raises that the five functions cannot answer. Omit if empty.
 
 @dataclass(frozen=True)
 class ToolInvocation:
-    """One attempted call and what came back, as the trace will show it."""
+    """One attempted call and its result."""
 
     call_id: str
     function: str
@@ -253,7 +243,7 @@ class ToolInvocation:
 
 @dataclass(frozen=True)
 class Turn:
-    """One LLM round trip: what it thought, what it said, and what it asked to run."""
+    """One LLM round trip: its reasoning, its content, and the calls it requested."""
 
     index: int
     reasoning: str
@@ -266,7 +256,7 @@ class Turn:
 
 @dataclass
 class PlannerRun:
-    """Everything about one run, kept whole so the trace can show how it got there."""
+    """The complete state of one run."""
 
     source: str
     focus: str | None
@@ -278,14 +268,13 @@ class PlannerRun:
     messages: list[dict[str, Any]] = field(default_factory=list)
     findings: str = ""
     stop_reason: str = ""
-    # Set when a model call failed and ended the run early. The trace reports it rather than
-    # pretending the agent chose to stop.
+    # Set when a model call failed and ended the run early.
     error: str | None = None
-    # (call signature, headline result) for every DISTINCT call made, in the order first made. Never
-    # trimmed: this is what stops the agent re-running work whose full result has since been
-    # compacted out of the window. Deduplicated by signature — see `record_calls`.
+    # (call signature, headline result) for every distinct call made, in the order first made.
+    # Never trimmed, so the agent can still see a call happened after its full result has been
+    # compacted out of the window. Deduplicated by signature; see `record_calls`.
     ledger: list[tuple[str, str]] = field(default_factory=list)
-    # signature -> how many times it has been requested. Only signatures asked more than once appear.
+    # signature -> how many times it was requested. Only signatures asked more than once appear.
     repeats: dict[str, int] = field(default_factory=dict)
     audit: AuditLog | None = None
     cap: CallCap | None = None
@@ -301,16 +290,10 @@ class PlannerRun:
 
 def build_task_prompt(profile: dict[str, Any], focus: str | None, max_calls: int,
                       tools: list[dict[str, Any]], include_toolkit: bool = True) -> str:
-    """The user turn: the profile as upfront context, plus the budget and any focus nudge.
+    """Build the user turn: the profile as upfront context, plus the budget and any focus nudge.
 
-    The profile is handed over rather than fetched. Making the agent spend a tool call to learn its
-    own schema would be a round trip to discover something already known at load time.
-
-    `include_toolkit` writes out the function list in prose. The planning turn needs it — it is
-    given no schemas, and without this it plans against a remembered toolkit. Every later turn is
-    given the real schemas, so carrying the prose copy as well would pay for the same information
-    twice, every turn, out of a context floor that cannot be trimmed. So the loop asks for it once
-    and then swaps it out.
+    `include_toolkit` writes the function list out in prose for the planning turn, which is offered
+    no tool schemas. Later turns receive the real schemas instead.
     """
     lines = [
         "Here is the file. Its schema profile is already loaded and is given to you in full below;",
@@ -361,16 +344,10 @@ def build_task_prompt(profile: dict[str, Any], focus: str | None, max_calls: int
 
 def format_toolkit(tools: list[dict[str, Any]],
                    column_names: list[str] | None = None) -> str:
-    """Render the tool schemas as prose for the planning turn, which is given no schemas of its own.
+    """Render the tool schemas as prose for the planning turn, which is given no schemas.
 
-    The plan turn deliberately runs with `tools=None` — a model handed tools answers with tool calls
-    and empty content, and the plan, the most readable part of a trace, never gets written. But it
-    was also being given no *description* of the toolkit, so it planned against a remembered one. A
-    graded run's planning reasoning read: "We have only five functions ... maybe others? Not listed
-    but typical toolkit includes ... But we assume these." It never used the two it failed to guess.
-
-    Rendered from `to_openai_tools(profile)` rather than written out by hand, so it cannot drift from
-    what is actually offered, and so a parameter dropped for this file disappears from here too.
+    Rendered from `to_openai_tools(profile)` so it cannot drift from what is actually offered, and
+    so a parameter dropped for this file disappears from here too.
     """
     columns = set(column_names or ())
     lines = []
@@ -381,20 +358,19 @@ def format_toolkit(tools: list[dict[str, Any]],
         rendered = []
         for name, spec in parameters["properties"].items():
             choices = spec.get("enum") or []
-            # Column enums are omitted: the profile above already lists every column with its role,
-            # and repeating five column lists here costs more context than the plan turn is worth.
-            # Enums that are NOT columns — like the outlier method — appear nowhere else, so they do.
+            # Column enums are omitted: the profile above already lists every column with its role.
+            # Enums that are not columns, such as the outlier method, appear nowhere else.
             allowed = "" if not choices or set(choices) <= columns else f"={'|'.join(map(str, choices))}"
             rendered.append(f"{name}{'' if name in required else '?'}{allowed}")
-        # First sentence only. The full schemas, descriptions included, arrive next turn; this
-        # listing exists so the plan knows what EXISTS, not to restate the whole contract.
+        # First sentence only. The full schemas arrive next turn; this listing exists so the plan
+        # knows what functions exist.
         summary = function["description"].split(". ")[0].rstrip(".")
         lines.append(f"- {function['name']}({', '.join(rendered)})\n    {summary}.")
     return "\n".join(lines)
 
 
 def _grouping_keys(tools: list[dict[str, Any]]) -> list[str]:
-    """Read the acceptable grouping columns straight out of the schemas the model is being given."""
+    """Extract the acceptable grouping columns from the schemas the model is given."""
     for schema in tools:
         if schema["function"]["name"] == "group_compare":
             spec = schema["function"]["parameters"]["properties"].get("group_col", {})
@@ -414,26 +390,24 @@ def run_planner(
 ) -> PlannerRun:
     """Drive the loop to a stopping point and return the whole run, transcript included.
 
-    `plan_first` spends one tool-less turn on a written plan before any tool is offered. Asking for
-    a plan in the prompt is not enough on its own: a model given tools will often answer with tool
-    calls and empty content, and the plan — the most readable part of a trace — never gets written.
-    It costs an LLM round trip and no tool-call budget.
+    `plan_first` spends one tool-less turn on a written plan before any tool is offered: a model
+    given tools tends to answer with tool calls and empty content. It costs an LLM round trip and
+    no tool-call budget.
     """
     profile = toolkit.profile
     tools = tools_for_profile(profile)
     max_calls = toolkit.cap.limit
-    # The schemas are re-sent on every turn, so they are part of every request's size.
+    # The schemas are re-sent every turn, so they are part of every request's size.
     schema_overhead = len(json.dumps(tools)) // CHARS_PER_TOKEN
 
     system_prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
     # Two versions of the same message. The plan turn is offered no schemas, so it gets the toolkit
-    # written out; every turn after that is given the real schemas and would otherwise pay for the
-    # same list twice, forever, out of a floor that cannot be trimmed. The second version replaces
-    # the first as soon as the plan is written.
+    # written out; every later turn has the real schemas and would otherwise pay for the same list
+    # twice. The second version replaces the first once the plan is written.
     task_prompt = build_task_prompt(profile, focus, max_calls, tools)
     working_prompt = build_task_prompt(profile, focus, max_calls, tools, include_toolkit=False)
-    # Before spending a single request: does anything fit alongside the fixed overhead? Measured on
-    # the *working* prompt, since that is the one re-sent on every turn.
+    # Check the fixed overhead leaves room for results before spending a request. Measured on the
+    # working prompt, which is the one re-sent every turn.
     check_context_headroom(context_floor(system_prompt, working_prompt, tools), context_budget)
 
     run = PlannerRun(
@@ -446,9 +420,9 @@ def run_planner(
         audit=toolkit.audit,
         cap=toolkit.cap,
     )
-    # The ledger sits at a fixed index and is rewritten in place every turn. It lives inside the
-    # protected prefix, so trimming can compact the detailed results below it but can never remove
-    # the record that those calls happened — which is what stops the agent re-running them.
+    # The ledger sits at a fixed index and is rewritten in place every turn, inside the protected
+    # prefix. Trimming can compact the detailed results below it but never removes the record that
+    # those calls happened.
     ledger_index = 2
     run.messages = [
         {"role": "system", "content": system_prompt},
@@ -473,7 +447,7 @@ def run_planner(
         run.turns.append(_turn(1, plan, (), kind="plan"))
         emit("plan", plan)
         first_index = 2
-        # The written-out toolkit has done its job; the real schemas take over from here.
+        # The written-out toolkit has done its job; the real schemas take over here.
         run.messages[1] = {"role": "user", "content": working_prompt}
 
     protected = len(run.messages)
@@ -508,8 +482,8 @@ def run_planner(
     else:
         run.stop_reason = "turn limit reached"
 
-    # A run that ended because the API died has no working API to write its findings with, so it
-    # skips the write-up rather than spending a doomed request. The trace still gets written.
+    # A run that ended because the API failed has no working API to write findings with, so it
+    # skips the write-up. The trace is still written.
     if run.stop_reason != "model finished" and run.error is None:
         emit("wrapping_up", run.stop_reason)
         run.messages[ledger_index] = {"role": "system", "content": render_ledger(run.ledger, run.repeats)}
@@ -533,10 +507,8 @@ def _safe_complete(
 ) -> LLMResponse | None:
     """One model call that records its own failure instead of raising through the loop.
 
-    A run that dies on an API error still has everything before that point worth keeping - the plan,
-    the calls, the flags it saw. Letting the exception escape would throw all of it away before the
-    trace is written, which is exactly what a trace exists to prevent. Returning None means "stop,
-    but keep what you have"; run.error carries the reason so the trace can say what happened.
+    Returns None to stop the loop while keeping everything gathered so far; run.error carries the
+    reason for the trace.
     """
     if writeup_for is not None:
         messages.append({
@@ -565,10 +537,10 @@ def _run_tool_calls(
     emit: Callable[[str, Any], None],
     headlines: dict[str, str],
 ) -> tuple[tuple[ToolInvocation, ...], bool]:
-    """Execute one turn's calls through the single door, appending a tool message for each.
+    """Execute one turn's calls through the executor, appending a tool message for each.
 
-    Every call gets a reply even after the budget is gone. The chat protocol requires one tool
-    message per tool_call id, so skipping the tail of a batch would make the next request invalid.
+    Every call gets a reply even after the budget is gone: the chat protocol requires one tool
+    message per tool_call id, so skipping the tail of a batch would invalidate the next request.
     """
     invocations: list[ToolInvocation] = []
     exhausted = False
@@ -578,7 +550,7 @@ def _run_tool_calls(
             invocation = _failed(call, toolkit, "CALL_CAP_EXCEEDED",
                                  "budget was exhausted earlier in this same turn")
         elif call.parse_error:
-            # Never reached the executor, so it costs no budget — but the model still needs to know.
+                # Never reached the executor, so no budget was charged; the model still needs a reply.
             invocation = _failed(call, toolkit, "MALFORMED_ARGUMENTS",
                                  f"arguments were not valid JSON: {call.parse_error}")
         else:
@@ -597,8 +569,8 @@ def _run_tool_calls(
                     data=result.data,
                     error=result.error,
                     error_code=result.error_code,
-                    # The executor's own canonical signature, not one re-derived here: the ledger and
-                    # the duplicate guard must agree about what counts as the same call.
+                        # The executor's own canonical signature, so the ledger and the duplicate
+                        # guard agree about what counts as the same call.
                     signature=result.signature,
                 )
 
@@ -627,16 +599,9 @@ def _failed(call: ToolCall, toolkit: GuardedToolkit, code: str, message: str) ->
 def record_calls(run: PlannerRun, invocations: Sequence[ToolInvocation]) -> None:
     """Fold this turn's calls into the ledger, deduplicated by call signature.
 
-    A repeat must not become a new numbered entry. When it did, the list grew every turn and read
-    like progress: one graded run issued the identical `compute_correlation(foot_traffic,
-    units_sold)` three times with a correct ledger in front of it each time, and the ledger showed
-    three separate lines rather than one line asked for three times.
-
-    The signature — same function, same arguments — is the identity. A repeat updates the existing
-    entry in place, keeping its original position because that is when the answer was obtained, and
-    increments a count that `render_ledger` surfaces. Note that the call cap is still charged for
-    it: the call was made, and the audit log records every attempt. What changes is only whether the
-    agent can see that it is asking again instead of advancing.
+    A repeat updates the existing entry in place, keeping its original position, and increments a
+    count that `render_ledger` surfaces. The call cap is still charged for the repeat, and the
+    audit log still records it.
     """
     for invocation in invocations:
         signature = invocation.signature or call_signature(invocation.function,
@@ -644,10 +609,9 @@ def record_calls(run: PlannerRun, invocations: Sequence[ToolInvocation]) -> None
         headline = _headline(invocation)
         for position, (existing, kept) in enumerate(run.ledger):
             if existing == signature:
-                # A repeat is now refused by the executor, so its headline reads "refused:
-                # DUPLICATE_CALL". Writing that over the entry would erase the answer the ledger
-                # exists to preserve — the agent would be told it already ran the call and shown
-                # nothing it could use. A failure never overwrites a success.
+                    # A repeat is refused by the executor, so its headline reads "refused:
+                    # DUPLICATE_CALL". A failure never overwrites a success, or the ledger would
+                    # lose the answer it exists to preserve.
                 if invocation.ok or not kept.startswith("refused"):
                     run.ledger[position] = (signature, headline if invocation.ok else kept)
                 run.repeats[signature] = run.repeats.get(signature, 1) + 1
@@ -658,15 +622,14 @@ def record_calls(run: PlannerRun, invocations: Sequence[ToolInvocation]) -> None
 
 def render_ledger(entries: list[tuple[str, str]],
                   repeats: dict[str, int] | None = None) -> str:
-    """The always-present memory of what has already been run, in one compact block."""
+    """Render the record of what has already been run as one compact block."""
     if not entries:
         return LEDGER_HEADER + "\n\n(nothing yet)"
     counts = repeats or {}
     lines = []
     for index, (signature, headline) in enumerate(entries, 1):
         asked = counts.get(signature, 1)
-        # Naming the repetition is the point: the model that repeated a call had the answer in front
-        # of it and did not notice it was re-asking rather than progressing.
+        # Name the repetition, so a repeated call is visible as a repeat rather than as progress.
         again = (f"   [ALREADY REQUESTED {asked} TIMES - the answer did not change, "
                  f"and each attempt cost a call]") if asked > 1 else ""
         lines.append(f"{index}. {signature} -> {headline}{again}")
@@ -674,24 +637,19 @@ def render_ledger(entries: list[tuple[str, str]],
 
 
 def _estimate_tokens(messages: list[dict[str, Any]], overhead: int = 0) -> int:
-    """Cheap character-based estimate of one whole request. Precision is waste; direction is not.
+    """Character-based estimate of one whole request.
 
-    `overhead` is for anything sent alongside the messages - in practice the tool schemas, which go
-    up on every turn. Leaving them out made the estimate quietly optimistic by about 700 tokens.
+    `overhead` covers anything sent alongside the messages, in practice the tool schemas.
     """
     body = sum(len(json.dumps(message, default=str)) for message in messages) // CHARS_PER_TOKEN
     return body + overhead
 
 
 def context_floor(system_prompt: str, task_prompt: str, tools: list[dict[str, Any]]) -> int:
-    """Estimated size of the part of every request that trimming is never allowed to touch.
+    """Estimated size of the part of every request that trimming may never touch.
 
-    The system prompt, the profile, the ledger header, the written plan and the tool schemas go up
-    on every single turn and cannot be compacted or dropped. If that floor approaches the budget,
-    `trim_transcript` has nothing left it may remove and will hand back an over-budget request
-    anyway — silently, until the API refuses it mid-run. So the floor is measured up front rather
-    than discovered. The plan is model-written and so is counted at a nominal size; everything else
-    is measured exactly.
+    Covers the system prompt, the profile, the ledger header, the written plan and the tool
+    schemas. The plan is model-written and counted at a nominal size; everything else is measured.
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -704,11 +662,10 @@ def context_floor(system_prompt: str, task_prompt: str, tools: list[dict[str, An
 
 
 def check_context_headroom(floor: int, budget: int = CONTEXT_TOKEN_BUDGET) -> int:
-    """Refuse to start a run whose fixed overhead leaves no room for results. Returns the headroom.
+    """Raise if the fixed overhead leaves no room for tool results. Returns the headroom.
 
-    Raised rather than warned, and raised *before* the first request, because the alternative is a
-    run that burns real quota to reach an HTTP 413 — or worse, one that completes while reasoning
-    only from compacted headlines and looks like a genuine result.
+    Checked before the first request, so a run cannot start and then reason only from compacted
+    headlines.
     """
     headroom = budget - floor
     if headroom < MIN_RESULT_HEADROOM:
@@ -722,7 +679,7 @@ def check_context_headroom(floor: int, budget: int = CONTEXT_TOKEN_BUDGET) -> in
 
 
 def _headline(invocation: ToolInvocation) -> str:
-    """The few numbers from a result that a later turn might still need to cite."""
+    """Condense a result to the few numbers a later turn might need to cite."""
     if not invocation.ok:
         return f"refused: {invocation.error_code}"
     data = invocation.data or {}
@@ -739,8 +696,8 @@ def _headline(invocation: ToolInvocation) -> str:
                 f"{data.get('n_present')} rows")
     if invocation.function == "group_compare":
         high, low = data.get("highest_group", {}), data.get("lowest_group", {})
-        # Name the ratio. A bare "ratio 8.32" in the ledger is what a previous run read as
-        # "8.3x the overall mean" when it is highest-over-lowest; the overall mean ratio was 5.1.
+        # Name the ratio: a bare "ratio 8.32" is ambiguous between highest-over-lowest and a ratio
+        # to the overall mean, which for that result was 5.1.
         return (f"{data.get('n_groups_total')} groups; highest {high.get('group')}"
                 f"={high.get('mean')}, lowest {low.get('group')}={low.get('mean')}, "
                 f"highest/lowest={data.get('highest_over_lowest_ratio')}; "
@@ -759,12 +716,11 @@ def trim_transcript(
     protected: int | None = None,
     overhead: int = 0,
 ) -> list[dict[str, Any]]:
-    """Shrink the transcript to fit the budget, cheapest loss first.
+    """Shrink the transcript to fit the budget.
 
-    Two passes, in order of what hurts least: compact old tool payloads down to their headline
-    numbers, and only if that is still not enough, drop whole old exchanges. Exchanges are dropped
-    as units — an assistant message with tool_calls and its tool replies go together, because a
-    tool_call without its reply makes the request malformed.
+    Two passes: compact old tool payloads to their headline numbers, then, if that is not enough,
+    drop whole old exchanges. Exchanges are dropped as units, since a tool_call without its reply
+    makes the request malformed.
     """
     if _estimate_tokens(messages, overhead) <= budget:
         return messages
@@ -783,8 +739,8 @@ def trim_transcript(
         if _estimate_tokens(trimmed, overhead) <= budget:
             return trimmed
 
-    # Still over. Drop the oldest exchanges, keeping the protected prefix: the system prompt, the
-    # profile, the ledger, the plan and the message that handed over the toolkit.
+    # Still over budget. Drop the oldest exchanges, keeping the protected prefix: system prompt,
+    # profile, ledger, plan, and the message that handed over the toolkit.
     prefix = _protected_prefix(trimmed) if protected is None else protected
     while _estimate_tokens(trimmed, overhead) > budget:
         end = _first_exchange_end(trimmed, prefix)
@@ -832,8 +788,8 @@ def _first_exchange_end(messages: list[dict[str, Any]], start: int) -> int | Non
 
 
 def _tool_payload(invocation: ToolInvocation) -> str:
-    """What the model sees back. The rejection text is passed through verbatim: it names the
-    columns that would have worked, and that message is the whole self-correction mechanism."""
+    """What the model sees back. Rejection text is passed through verbatim, since it names the
+    columns that would have worked."""
     if invocation.ok:
         payload: dict[str, Any] = {"ok": True, "result": invocation.data}
     else:

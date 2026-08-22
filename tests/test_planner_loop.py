@@ -1,8 +1,7 @@
-"""
-test_planner_loop.py — drives the loop with a scripted model instead of Groq.
-Exists because the parts of the loop most worth checking are the ones that are awkward to trigger
-against a live API: a rejection being fed back for self-correction, the call cap firing mid-batch,
-malformed tool arguments, and the transcript staying a valid chat sequence throughout.
+"""Drives the planning loop with a scripted model instead of the live API.
+
+Covers rejection feedback, the call cap firing mid-batch, malformed tool arguments, the ledger,
+context trimming, and the transcript staying a valid chat sequence throughout.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from guardrails.executor import GuardedToolkit
 
 
 class ScriptedModel:
-    """A ChatModel that replays prepared responses and remembers what it was asked."""
+    """A ChatModel that replays prepared responses and records what it was asked."""
 
     def __init__(self, responses: list[LLMResponse]) -> None:
         self._responses = list(responses)
@@ -65,7 +64,7 @@ def training_kit(loaded):
 # --- the profile is context, not a tool call ------------------------------------------------
 
 def test_the_profile_is_handed_over_up_front(training_kit):
-    """The agent should never have to spend a round trip discovering its own schema."""
+    """The profile is in the task prompt, so no tool call is spent discovering the schema."""
     kit = training_kit()
     model = ScriptedModel([say(PLAN), say("## Findings\nDone.")])
     run = run_planner(kit, model, model_name="stub")
@@ -154,7 +153,7 @@ def test_tool_results_reach_the_model_with_the_remaining_budget(training_kit):
 # --- self-correction from a rejection -----------------------------------------------------------
 
 def test_a_rejection_is_fed_back_with_the_columns_that_would_have_worked(training_kit):
-    """The rejection message is the self-correction mechanism, so it must arrive verbatim."""
+    """The rejection message reaches the model verbatim, naming the columns that would have worked."""
     kit = training_kit()
     model = ScriptedModel([
         say(PLAN),
@@ -182,7 +181,7 @@ def test_a_rejection_is_fed_back_with_the_columns_that_would_have_worked(trainin
 
 
 def test_malformed_tool_arguments_are_reported_without_charging_budget(training_kit):
-    """Bad JSON never reaches the executor, so it costs nothing — but the model must be told."""
+    """Malformed JSON never reaches the executor, so it costs no budget, but the model is told."""
     kit = training_kit()
     broken = ToolCall(id="c1", name="get_summary_stats", arguments={},
                       raw_arguments="{oops", parse_error="Expecting property name")
@@ -217,7 +216,7 @@ def test_the_call_cap_ends_the_run_and_still_produces_findings(training_kit):
 
 
 def test_every_tool_call_gets_a_reply_even_after_the_budget_dies(training_kit):
-    """The chat protocol needs one tool message per tool_call id; a short batch would 400."""
+    """One tool message per tool_call id, even after the budget is exhausted."""
     kit = training_kit(max_calls=1)
     model = ScriptedModel([
         say(PLAN),
@@ -250,7 +249,7 @@ def test_the_turn_limit_also_forces_a_write_up(training_kit):
 
 
 def _assert_transcript_is_well_formed(messages: list[dict]) -> None:
-    """Every assistant tool_call id must be answered by exactly one following tool message."""
+    """Assert every assistant tool_call id is answered by exactly one following tool message."""
     for index, message in enumerate(messages):
         if message["role"] != "assistant" or not message.get("tool_calls"):
             continue
@@ -339,7 +338,7 @@ def test_the_trace_shows_the_reversal_and_the_rejection(training_kit):
 # --- context management: the ledger and the trimmer ---------------------------------------------
 
 def test_the_ledger_records_every_call_and_survives_trimming(training_kit):
-    """Trimming compacts old results, so the ledger is what stops the agent re-running them."""
+    """The ledger records every call and stays intact after trimming compacts the results."""
     from agent.planner_loop import render_ledger, trim_transcript
 
     kit = training_kit(max_calls=10)
@@ -369,16 +368,14 @@ def test_the_ledger_records_every_call_and_survives_trimming(training_kit):
 
 
 def _bare_run():
-    """A PlannerRun with only the fields record_calls touches, for testing the ledger in isolation."""
+    """A PlannerRun with only the fields record_calls touches, for testing the ledger alone."""
     from agent.planner_loop import PlannerRun
     return PlannerRun(source="x", focus=None, model_name="stub",
                       system_prompt="", task_prompt="", profile={})
 
 
 def test_a_repeated_call_updates_its_ledger_entry_instead_of_adding_one(training_kit):
-    """Regression, from the Day 5 store_monthly_sales run: the agent issued the identical
-    compute_correlation three times with a correct ledger in front of it each time, and the ledger
-    showed three separate numbered lines. A growing list reads like progress."""
+    """A repeated call updates its existing ledger entry rather than adding a numbered one."""
     from agent.planner_loop import render_ledger
 
     kit = training_kit(max_calls=10)
@@ -403,7 +400,7 @@ def test_a_repeated_call_updates_its_ledger_entry_instead_of_adding_one(training
 
 
 def test_a_repeat_keeps_its_original_position_and_refreshes_its_headline(training_kit):
-    """Position is when the answer was first obtained, so a repeat must not reorder the list."""
+    """A repeat keeps its original position, which is when the answer was first obtained."""
     from agent.planner_loop import ToolInvocation, record_calls
     from agent.planner_loop import PlannerRun
 
@@ -426,8 +423,7 @@ def test_a_repeat_keeps_its_original_position_and_refreshes_its_headline(trainin
 
 
 def test_distinct_calls_are_never_collapsed(training_kit):
-    """The signature is function plus arguments: same function, different arguments is a new call,
-    and so is the same pair with a group_by added."""
+    """The signature is function plus arguments, so different arguments make a distinct call."""
     from agent.planner_loop import ToolInvocation, PlannerRun, record_calls
 
     run = _bare_run()
@@ -446,8 +442,7 @@ def test_distinct_calls_are_never_collapsed(training_kit):
 
 
 def test_a_repeated_rejection_is_also_deduplicated(training_kit):
-    """Rejections are charged and remembered too, so an agent retrying a refused call unchanged
-    must see that it is retrying rather than making progress."""
+    """Rejections are charged and deduplicated too, so a retried refusal is visible as a repeat."""
     kit = training_kit(max_calls=10)
     bad = {"group_col": "employee_id", "value_col": "output_points"}
     model = ScriptedModel([
@@ -464,7 +459,7 @@ def test_a_repeated_rejection_is_also_deduplicated(training_kit):
 
 
 def test_the_ledger_is_rewritten_in_place_not_appended(training_kit):
-    """One ledger message, always current -- not a growing pile of stale ones."""
+    """There is one ledger message, rewritten in place rather than appended to."""
     from agent.planner_loop import LEDGER_HEADER
 
     kit = training_kit(max_calls=10)
@@ -509,8 +504,8 @@ def test_trimming_compacts_old_results_before_dropping_anything(training_kit):
 
 
 def test_the_context_budget_covers_the_tool_schemas_too(training_kit):
-    """Regression: the schemas are resent every turn but were not counted, so real requests ran
-    about 700 tokens over what the estimator believed and a 413 arrived unexplained."""
+    """The context estimate includes the tool schemas, which are re-sent every turn and add about
+    700 tokens."""
     from agent.planner_loop import _estimate_tokens as est
 
     messages = [{"role": "user", "content": "x" * 400}]
@@ -520,9 +515,11 @@ def test_the_context_budget_covers_the_tool_schemas_too(training_kit):
 
 @pytest.mark.parametrize("dataset", ["marketing", "stores", "training"])
 def test_every_fixture_leaves_room_for_results_after_the_fixed_overhead(loaded, dataset):
-    """Regression: a prompt edit pushed the un-droppable floor past the budget on all three files.
-    Nothing failed — trimming simply had nothing it was allowed to drop, so every request would
-    have gone out over budget. This is the check that turns that into a red test, not a dead run."""
+    """Every fixture leaves room for tool results once the un-droppable floor is paid for.
+
+    Without this check, a prompt edit that pushes the floor past the budget fails silently:
+    trimming has nothing it may drop and every request goes out over budget.
+    """
     from agent.planner_loop import (SYSTEM_PROMPT, TOOLKIT_LIMITATIONS, build_task_prompt,
                                     check_context_headroom, context_floor, MIN_RESULT_HEADROOM)
 
@@ -538,8 +535,7 @@ def test_every_fixture_leaves_room_for_results_after_the_fixed_overhead(loaded, 
 
 
 def test_a_run_with_no_room_for_results_refuses_before_spending_a_request(training_kit):
-    """It raises, and it raises early. Discovering this at the API costs a real run's quota; worse,
-    a run that squeaks through reasons only from compacted headlines and still looks finished."""
+    """check_context_headroom raises before the first request, not at the API."""
     from agent.planner_loop import check_context_headroom, context_floor
 
     kit = training_kit(max_calls=4)
@@ -558,7 +554,7 @@ def test_a_run_with_no_room_for_results_refuses_before_spending_a_request(traini
 # --- a dying API must not take the evidence with it ---------------------------------------------
 
 class FailingModel:
-    """Replays responses, then raises — standing in for the API dying mid-run."""
+    """Replays responses, then raises, standing in for the API failing mid-run."""
 
     def __init__(self, responses: list[LLMResponse], error: Exception) -> None:
         self._responses = list(responses)
@@ -573,7 +569,7 @@ class FailingModel:
 
 
 def test_an_api_failure_ends_the_run_but_keeps_everything_gathered(training_kit):
-    """The whole point of a trace is to survive this. Losing 10 good calls to a 429 is the bug."""
+    """An API failure ends the run but keeps the plan, the calls and the flags already gathered."""
     kit = training_kit(max_calls=10)
     model = FailingModel(
         [
@@ -623,7 +619,7 @@ def test_a_failure_on_the_very_first_call_still_returns_a_run(training_kit):
 
 
 def test_an_aborted_run_does_not_spend_a_doomed_write_up_call(training_kit):
-    """No working API means no findings; burning another request on it helps nobody."""
+    """An aborted run skips the write-up rather than spending a request that cannot succeed."""
     kit = training_kit(max_calls=10)
     model = FailingModel([say(PLAN), say("Working.", call("get_summary_stats",
                                                           {"column": "output_points"}, "c1"))],
@@ -637,10 +633,7 @@ def test_an_aborted_run_does_not_spend_a_doomed_write_up_call(training_kit):
 # --- the planning turn is told what the toolkit actually is --------------------------------------
 
 def test_the_plan_turn_is_given_the_real_function_list(training_kit):
-    """Regression: the plan turn is offered no schemas, and was given no description of the toolkit
-    either, so it planned against a remembered one. A graded run's planning reasoning read: "We have
-    only five functions ... maybe others? Not listed but typical toolkit includes ... But we assume
-    these." It never called the two it failed to guess."""
+    """The plan turn is given the function list in prose, since it is offered no tool schemas."""
     kit = training_kit()
     model = ScriptedModel([say(PLAN), say("## Findings\nDone.")])
     run_planner(kit, model, model_name="stub")
@@ -653,8 +646,8 @@ def test_the_plan_turn_is_given_the_real_function_list(training_kit):
 
 
 def test_the_function_list_is_rendered_from_the_schemas_not_written_out(training_kit):
-    """Derived from to_openai_tools(profile), so it cannot drift from what is actually offered and
-    a tool dropped for this file disappears from the listing too."""
+    """The listing is derived from to_openai_tools(profile), so a tool dropped for this file
+    disappears from it too."""
     from agent.planner_loop import format_toolkit
 
     kit = training_kit()
@@ -669,8 +662,8 @@ def test_the_function_list_is_rendered_from_the_schemas_not_written_out(training
 
 
 def test_a_non_column_enum_is_spelled_out_but_column_enums_are_not(training_kit):
-    """Column lists are already in the profile directly above; repeating five of them costs more
-    context than the plan turn is worth. `method` appears nowhere else, so it is written out."""
+    """Column enums are omitted, since the profile lists them directly above. `method` appears
+    nowhere else, so it is written out."""
     from agent.planner_loop import format_toolkit
 
     kit = training_kit()
@@ -682,8 +675,8 @@ def test_a_non_column_enum_is_spelled_out_but_column_enums_are_not(training_kit)
 
 
 def test_the_function_list_is_dropped_once_the_real_schemas_arrive(training_kit):
-    """It is needed for one request. Carrying it afterwards pays twice for the same information,
-    every turn, out of a context floor that trimming is not allowed to touch."""
+    """The prose function list is dropped once the real schemas arrive, so it is not paid for
+    twice on every turn."""
     kit = training_kit()
     model = ScriptedModel([
         say(PLAN),
@@ -702,8 +695,8 @@ def test_the_function_list_is_dropped_once_the_real_schemas_arrive(training_kit)
 
 
 def test_the_prompt_gives_the_other_functions_real_coverage():
-    """The system prompt was 34 lines about correlation and 4 about everything else, and never
-    named two of the five functions. The agent called neither of them in any Day 5 run."""
+    """The system prompt gives the non-correlation functions their own section, and names all
+    five functions."""
     from agent.planner_loop import SYSTEM_PROMPT, TOOLKIT_LIMITATIONS
 
     prompt = SYSTEM_PROMPT.format(limitations=TOOLKIT_LIMITATIONS)
@@ -719,8 +712,7 @@ def test_the_prompt_gives_the_other_functions_real_coverage():
     others = len(sections["THE OTHER FOUR FUNCTIONS ARE NOT A SIDESHOW"])
 
     assert others > 0
-    # Correlation still leads - it has the most ways to mislead you - but not by 8x, which is where
-    # this started (34 lines against 4, with two of the five functions never named at all).
+    # Correlation still leads, since it has the most ways to mislead, but the ratio is bounded.
     assert correlation / others < 4, f"correlation {correlation} lines vs other tools {others}"
 
 
@@ -740,8 +732,7 @@ def _sections(prompt: str) -> list[tuple[str, list[str]]]:
 # --- the duplicate guard, seen from the loop -----------------------------------------------------
 
 def test_a_repeated_call_comes_back_as_a_rejection_the_model_can_read(training_kit):
-    """The refusal reaches the model through the same path as any other rejection, so the existing
-    self-correction machinery carries it without a special case."""
+    """A duplicate refusal reaches the model through the same path as any other rejection."""
     kit = training_kit(max_calls=10)
     same = {"column": "output_points"}
     model = ScriptedModel([
@@ -763,8 +754,7 @@ def test_a_repeated_call_comes_back_as_a_rejection_the_model_can_read(training_k
 
 
 def test_a_refused_duplicate_does_not_erase_the_answer_in_the_ledger(training_kit):
-    """The repeat's headline is "refused: DUPLICATE_CALL". Writing that over the entry would leave
-    the agent told it already ran the call and shown nothing it could use."""
+    """A refused duplicate does not overwrite the ledger entry holding the original answer."""
     from agent.planner_loop import render_ledger
 
     kit = training_kit(max_calls=10)
@@ -784,8 +774,7 @@ def test_a_refused_duplicate_does_not_erase_the_answer_in_the_ledger(training_ki
 
 
 def test_the_ledger_and_the_executor_agree_on_what_one_call_is(training_kit):
-    """Two spellings of the same call must not become two ledger entries either - the ledger takes
-    the executor's own signature rather than deriving a second opinion from the raw request."""
+    """The ledger takes the executor's own call signature, so both agree on what one call is."""
     kit = training_kit(max_calls=10)
     pair = {"col_a": "tenure_months", "col_b": "output_points"}
     model = ScriptedModel([

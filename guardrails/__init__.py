@@ -1,5 +1,4 @@
-"""
-guardrails — the three non-negotiables from CLAUDE.md: allowlist validation against the loaded
-file's real schema, a call cap that raises, and an append-only audit log.
-executor.py wires them into the single door every tool call must pass through.
+"""Allowlist validation, call cap, and audit log.
+
+executor.py combines them into the single entry point for tool calls.
 """

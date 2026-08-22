@@ -1,8 +1,7 @@
-"""
-functions.py — the fixed set of analysis primitives the agent may run: summary stats, correlation
-(optionally stratified by a subgroup), outlier detection, group comparison and value counts.
-Exists because the agent picks functions instead of writing code, so this file is its entire action
-space; every result is JSON-safe and size-bounded, since results are fed straight back into a prompt.
+"""The fixed set of analysis primitives the agent may run.
+
+Summary stats, correlation (optionally stratified by a subgroup), outlier detection, group
+comparison and value counts. Every result is JSON-safe and size-bounded.
 """
 
 from __future__ import annotations
@@ -14,19 +13,16 @@ import pandas as pd
 from scipy import stats
 
 # --- output bounds --------------------------------------------------------------------------
-# Every function truncates. Two reasons: results go back into the model's context, where unbounded
-# output blows the window and the token budget; and a "finding" list of 400 rows is not a finding.
-# Truncation is never silent — each result carries a `truncated` flag and the true total.
+# Every function truncates its output, since results are fed back into the model's context.
+# Truncation is never silent: each result carries a `truncated` flag and the true total.
 MAX_CATEGORIES_RETURNED = 20
 MAX_GROUPS_RETURNED = 20
 MAX_OUTLIER_EXAMPLES = 10
 
-# Correlation on a handful of rows is noise. Groups below this are reported as skipped rather than
-# handed back with a meaningless r that the agent might quote.
+# Groups smaller than this are reported as skipped rather than given a correlation.
 MIN_ROWS_FOR_CORRELATION = 10
 
-# The two ways a pooled correlation fails to survive stratification. Both are arithmetic tests, not
-# judgments — the agent still decides what they mean, but it should not have to notice them itself.
+# The two ways a pooled correlation fails to survive stratification. Both are arithmetic tests.
 SIGN_REVERSAL_MIN_ABS_R = 0.10   # ignore sign flips that are indistinguishable from noise
 ATTENUATION_RATIO = 0.50         # "vanishes" = strongest subgroup |r| is under half the pooled |r|
 
@@ -35,7 +31,7 @@ IQR_MULTIPLIER = 1.5
 
 
 def _j(value: Any, digits: int = 4) -> Any:
-    """Make a numpy/pandas scalar JSON-safe. NaN and inf become None so json.dumps stays valid."""
+    """Make a numpy/pandas scalar JSON-safe. NaN and inf become None."""
     if value is None or value is pd.NaT:
         return None
     item = value.item() if hasattr(value, "item") else value
@@ -45,7 +41,7 @@ def _j(value: Any, digits: int = 4) -> Any:
 
 
 def _strength(r: float | None) -> str:
-    """Plain-language bucket for |r|, so every report describes the same number the same way."""
+    """Plain-language bucket for |r|."""
     if r is None:
         return "undefined"
     magnitude = abs(r)
@@ -59,7 +55,7 @@ def _strength(r: float | None) -> str:
 
 
 def _numeric(df: pd.DataFrame, column: str) -> pd.Series:
-    """Coerce a column to float. Values that cannot be parsed become NaN rather than raising."""
+    """Coerce a column to float. Unparseable values become NaN rather than raising."""
     return pd.to_numeric(df[column], errors="coerce").astype(float)
 
 
@@ -98,8 +94,7 @@ def get_summary_stats(df: pd.DataFrame, column: str) -> dict[str, Any]:
             "p75": _j(q3),
             "max": _j(values.max()),
             "iqr": _j(q3 - q1),
-            # A wide mean/median gap is the cheapest tell that one segment is dragging the average,
-            # which is the exact mistake this project's store dataset is built to provoke.
+            # A wide mean/median gap indicates one segment is dragging the average.
             "mean_median_gap_ratio": (
                 _j(abs(float(values.mean()) - median) / abs(median)) if median != 0 else None
             ),
@@ -115,8 +110,8 @@ def get_summary_stats(df: pd.DataFrame, column: str) -> dict[str, Any]:
 def _pair_correlation(a: pd.Series, b: pd.Series) -> dict[str, Any]:
     """Pearson and Spearman for one aligned pair.
 
-    Spearman rides along because it is robust to the single-segment outliers this same toolkit is
-    asked to find: a large Pearson/Spearman gap means one cluster of rows is driving the result.
+    Spearman is included because it is robust to single-segment outliers: a large Pearson/Spearman
+    gap means one cluster of rows is driving the result.
     """
     paired = pd.DataFrame(
         {"a": pd.to_numeric(a, errors="coerce"), "b": pd.to_numeric(b, errors="coerce")}
@@ -146,10 +141,10 @@ def _pair_correlation(a: pd.Series, b: pd.Series) -> dict[str, Any]:
 def compute_correlation(
     df: pd.DataFrame, col_a: str, col_b: str, group_by: str | None = None
 ) -> dict[str, Any]:
-    """Correlate two numeric columns, and — if group_by is given — inside each subgroup as well.
+    """Correlate two numeric columns, and within each subgroup if group_by is given.
 
-    The stratified path is the point: a pooled r that reverses sign or collapses within subgroups
-    is a confound, not a finding, so the result reports both outcomes as explicit flags.
+    Reports sign_reversal and attenuated as explicit flags when the pooled r does not survive
+    stratification.
     """
     overall = _pair_correlation(df[col_a], df[col_b])
     result: dict[str, Any] = {
@@ -167,8 +162,8 @@ def compute_correlation(
         entry = {"group": str(value), **_pair_correlation(chunk[col_a], chunk[col_b])}
         (analysed if entry["pearson_r"] is not None else skipped).append(entry)
 
-    # When there are too many groups to return, keep the most informative ones (largest |r|) rather
-    # than an alphabetical head — but sort what survives by name so the output reads consistently.
+        # When there are too many groups to return, keep the largest |r| rather than an
+        # alphabetical head, then sort what survives by name.
     by_magnitude = sorted(analysed, key=lambda g: -abs(g["pearson_r"]))
     shown = sorted(by_magnitude[:MAX_GROUPS_RETURNED], key=lambda g: g["group"])
 
@@ -206,7 +201,7 @@ def compute_correlation(
 def _stratification_summary(
     overall_r: float | None, subgroup_rs: list[float], sign_reversal: bool, attenuated: bool
 ) -> str:
-    """One factual sentence restating the flags — no interpretation, just what the numbers did."""
+    """One sentence restating the stratification flags, with no interpretation."""
     if overall_r is None or not subgroup_rs:
         return "not enough data to compare pooled and subgroup correlations"
     n = len(subgroup_rs)
@@ -235,8 +230,8 @@ def _stratification_summary(
 def detect_outliers(df: pd.DataFrame, column: str, method: str = "zscore") -> dict[str, Any]:
     """Flag unusual values in one numeric column, by z-score or by the IQR fence.
 
-    Both methods are offered because z-score is *masked* by the thing it is looking for: a large
-    cluster of extreme rows inflates the standard deviation and can hide itself. IQR does not move.
+    Both methods are offered because z-score is masked by what it looks for: a large cluster of
+    extreme rows inflates the standard deviation. IQR does not move.
     """
     values = _numeric(df, column).dropna()
     n_rows = int(len(df))
@@ -301,8 +296,8 @@ def detect_outliers(df: pd.DataFrame, column: str, method: str = "zscore") -> di
 def group_compare(df: pd.DataFrame, group_col: str, value_col: str) -> dict[str, Any]:
     """Compare a numeric column across the levels of a grouping column.
 
-    This is how an outlier gets localised: detect_outliers says *that* rows are extreme, this says
-    *which segment* they belong to.
+    Localises an outlier: detect_outliers reports that rows are extreme, this reports which
+    segment they belong to.
     """
     frame = pd.DataFrame(
         {"group": df[group_col].astype(str), "value": _numeric(df, value_col)}
@@ -324,11 +319,9 @@ def group_compare(df: pd.DataFrame, group_col: str, value_col: str) -> dict[str,
             "std": _j(row["std"]),
             "min": _j(row["min"]),
             "max": _j(row["max"]),
-            # Ratio to the pooled MEDIAN, not the pooled mean: the mean is exactly what a runaway
-            # segment distorts, so comparing against it would hide the segment. The key says
-            # "overall_median" in full because a result that also carries `overall_mean` and calls
-            # this one "ratio_to_overall" is ambiguous - a reader picked the wrong denominator and
-            # reported a segment as being within 5% of a mean it was 37% below.
+            # Ratio to the pooled median, not the pooled mean, since a runaway segment distorts
+            # the mean. The key is named "overall_median" in full because the result also carries
+            # `overall_mean` and an ambiguous name invites reading the wrong denominator.
             "median_ratio_to_overall_median": (
                 _j(float(row["median"]) / overall_median) if overall_median != 0 else None
             ),
@@ -340,7 +333,7 @@ def group_compare(df: pd.DataFrame, group_col: str, value_col: str) -> dict[str,
     n_total = len(rows)
     truncated = n_total > MAX_GROUPS_RETURNED
     if truncated:
-        # Keep both ends: a comparison is about the extremes, so an alphabetical head is useless.
+        # Keep both ends: a comparison is about the extremes.
         half = MAX_GROUPS_RETURNED // 2
         shown = rows[:half] + rows[-half:]
     else:
@@ -378,7 +371,7 @@ def group_compare(df: pd.DataFrame, group_col: str, value_col: str) -> dict[str,
 # ----------------------------------------------------------------------------------------------
 
 def value_counts(df: pd.DataFrame, column: str) -> dict[str, Any]:
-    """Frequency of each value in a column, capped to the most common ones with a remainder bucket."""
+    """Frequency of each value in a column, capped with a remainder bucket."""
     series = df[column]
     n_rows = int(len(df))
     n_missing = int(series.isna().sum())

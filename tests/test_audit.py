@@ -1,8 +1,7 @@
-"""
-test_audit.py — proves the log is genuinely append-only and genuinely complete.
-Exists because the allowlist's value depends on refusals being visible: these tests assert entries
-are frozen, handed out as copies, never renumbered, and that the JSONL file only ever grows — and
-that rejected and capped calls appear in it alongside the successful ones.
+"""Tests for the audit log's append-only and completeness properties.
+
+Asserts entries are frozen, handed out as copies and never renumbered, that the JSONL file only
+grows, and that rejected and capped calls appear in it alongside successful ones.
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ def test_an_entry_cannot_be_edited_after_it_is_written():
 
 
 def test_reading_arguments_yields_a_fresh_copy_each_time():
-    """Arguments are stored as JSON text precisely so a frozen entry cannot leak a mutable dict."""
+    """Arguments are stored as JSON text, so a frozen entry cannot hand out a mutable dict."""
     log = AuditLog()
     entry = log.record("get_summary_stats", {"column": "ad_spend_usd"}, OUTCOME_ALLOWED)
 
@@ -65,7 +64,7 @@ def test_sequence_numbers_are_dense_and_strictly_increasing():
 
 
 def test_log_exposes_no_deletion_or_rewrite_api():
-    """The missing methods are the feature — there is no supported way to unsay something."""
+    """The log exposes no method to delete, clear, reorder or overwrite an entry."""
     for forbidden in ("clear", "pop", "remove", "delete", "truncate", "rewrite", "__delitem__",
                       "__setitem__", "insert", "sort"):
         assert not hasattr(AuditLog, forbidden), f"AuditLog should not expose {forbidden}"
@@ -85,7 +84,7 @@ def test_jsonl_file_only_ever_grows(tmp_path):
 
 
 def test_a_new_log_on_the_same_path_appends_rather_than_truncating(tmp_path):
-    """The file is opened 'a', never 'w' — a second run must not erase the first run's history."""
+    """The file is opened in append mode, so a second run does not erase the first."""
     path = tmp_path / "audit.jsonl"
     AuditLog(path).record("run_one", {}, OUTCOME_ALLOWED)
     first_run = path.read_bytes()
@@ -112,7 +111,7 @@ def test_every_written_line_is_valid_json(tmp_path):
 
 
 def test_unserialisable_arguments_are_recorded_rather_than_crashing_the_log():
-    """Losing the audit trail would be worse than an imprecise entry, so json.dumps falls back."""
+    """json.dumps falls back to str() rather than raising and losing the entry."""
     log = AuditLog()
     entry = log.record("group_compare", {"group_col": object()}, OUTCOME_REJECTED)
     assert isinstance(entry.arguments["group_col"], str)
@@ -152,7 +151,7 @@ def test_allowed_rejected_and_capped_all_reach_the_log(make_toolkit):
 
 
 def test_the_capped_call_records_what_the_agent_wanted_to_do(make_toolkit):
-    """A run that dies at the ceiling should still show the call it was reaching for."""
+    """A capped call is recorded with the arguments it was attempted with."""
     toolkit = make_toolkit("marketing", max_calls=1)
     toolkit.call("value_counts", {"column": "region"})
     with pytest.raises(CallCapExceeded):

@@ -1,7 +1,6 @@
-"""
-conftest.py — shared pytest fixtures: the three Day 1 datasets, loaded and profiled once per session.
-Exists so the guardrail tests assert against the real committed fixtures and the values recorded in
-eval/ground_truth.md, rather than toy frames that could drift from what the agent will actually see.
+"""Shared pytest fixtures: the three eval datasets, loaded and profiled once per session.
+
+Tests assert against the real committed fixtures and the values recorded in eval/ground_truth.md.
 Sitting at the repo root also puts the root on sys.path, so tests import the packages directly.
 """
 
@@ -26,7 +25,7 @@ DATASETS = {
 
 @pytest.fixture(scope="session")
 def loaded() -> dict[str, tuple]:
-    """Every eval dataset as (DataFrame, profile). Session-scoped: profiling is pure, so share it."""
+    """Every eval dataset as (DataFrame, profile). Session-scoped, since profiling is pure."""
     result = {}
     for key, filename in DATASETS.items():
         df = load_csv(DATA_DIR / filename)
@@ -36,13 +35,13 @@ def loaded() -> dict[str, tuple]:
 
 @pytest.fixture(scope="session")
 def profiles(loaded) -> dict[str, dict]:
-    """Just the profiles — what the validator actually consumes."""
+    """Just the profiles, which is what the validator consumes."""
     return {key: profile for key, (_, profile) in loaded.items()}
 
 
 @pytest.fixture
 def make_toolkit(loaded):
-    """Build a fresh GuardedToolkit per test: cap and audit log are mutable run state, not fixtures."""
+    """Build a fresh GuardedToolkit per test: the cap and audit log are mutable run state."""
 
     def _make(name: str, max_calls: int = 50, audit_path: Path | None = None) -> GuardedToolkit:
         df, profile = loaded[name]

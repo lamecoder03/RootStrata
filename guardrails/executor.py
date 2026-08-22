@@ -1,8 +1,7 @@
-"""
-executor.py — the single door every tool call passes through: charge the cap, validate, run, log.
-Exists because guardrails are only worth as much as the guarantee that nothing bypasses them, and one
-enforcement point is far easier to audit than three call sites. The cap raises through to the caller
-(the run is over); a validation failure comes back as a ToolResult carrying the reason, to retry from.
+"""The single entry point for tool calls: charge the cap, validate, run, log.
+
+CallCapExceeded propagates to the caller and ends the run. A validation failure comes back as a
+ToolResult carrying the reason.
 """
 
 from __future__ import annotations
@@ -31,12 +30,11 @@ DUPLICATE_CALL = "DUPLICATE_CALL"
 
 
 def call_signature(function_name: str, arguments: dict[str, Any] | None = None) -> str:
-    """The canonical identity of a call: its name and its arguments, order-independent.
+    """The canonical identity of a call: its name and arguments, order-independent.
 
-    Unset optional arguments are dropped, so `compute_correlation(a, b)` and the same call written
-    with an explicit `group_by=None` are one call rather than two. Computed from the *resolved*
-    arguments wherever possible, since that is the form the validator normalises to and therefore
-    the form two spellings of the same request converge on.
+    Unset optional arguments are dropped, so `compute_correlation(a, b)` and the same call with an
+    explicit `group_by=None` produce one signature. Uses the validator's resolved arguments where
+    available.
     """
     rendered = ", ".join(
         f"{key}={value!r}" for key, value in sorted((arguments or {}).items()) if value is not None
@@ -46,16 +44,15 @@ def call_signature(function_name: str, arguments: dict[str, Any] | None = None) 
 
 @dataclass(frozen=True)
 class ToolResult:
-    """What a call produced: either data, or the reason it was refused — never both."""
+    """What a call produced: either data or the reason it was refused, never both."""
 
     ok: bool
     function: str
     data: dict[str, Any] | None = None
     error: str | None = None
     error_code: str | None = None
-    # The validator's normalised arguments, and the canonical signature built from them. The caller
-    # needs the signature to record what ran without re-deriving it from the raw request and
-    # disagreeing with this class about what counts as the same call.
+    # The validator's normalised arguments and the canonical signature built from them, so the
+    # caller records what ran without re-deriving it.
     resolved: dict[str, Any] | None = None
     signature: str = ""
 
@@ -63,16 +60,12 @@ class ToolResult:
 class GuardedToolkit:
     """Runs allowlisted analysis functions against one loaded CSV, under cap, validation and audit.
 
-    Call order is deliberate. The cap is charged *first*, before validation, so an agent that spams
-    malformed calls still terminates — otherwise "rejected" would be a free action and a broken agent
-    could loop forever. Validation comes next, so a rejected call never reaches pandas. Then the
-    duplicate check, which needs the validator's normalised arguments to recognise two spellings of
-    one call. Everything, including the refusals, is written to the audit log.
+    Call order: the cap is charged first, so rejected calls still consume budget; then validation,
+    so a rejected call never reaches pandas; then the duplicate check, which needs the validator's
+    normalised arguments. Every outcome, including refusals, is written to the audit log.
 
-    The duplicate check is *here* rather than in the prompt because showing the agent its own repeats
-    was tried and did not work: the ledger collapsed a repeated call, labelled it "ALREADY REQUESTED
-    4 TIMES", put it at the top of every request, and the agent issued it a fourth time anyway. An
-    annotation is advice. This is the only layer that can decline.
+    A call whose signature matches an already-completed call is refused with the result it already
+    produced.
     """
 
     def __init__(
@@ -87,9 +80,9 @@ class GuardedToolkit:
         self._profile = profile
         self._cap = call_cap if call_cap is not None else CallCap(max_calls)
         self._audit = audit_log if audit_log is not None else AuditLog()
-        # signature -> the headline of the result it already produced. Only successful calls go in:
-        # a repeated *invalid* call must keep getting its own rejection, because that message names
-        # the columns that would have worked and is what the agent corrects from.
+        # signature -> headline of the result it produced. Only successful calls are recorded: a
+        # repeated invalid call must keep getting its own rejection, which names the columns that
+        # would have worked.
         self._completed: dict[str, str] = {}
 
     @classmethod
@@ -100,7 +93,7 @@ class GuardedToolkit:
         audit_log: AuditLog | None = None,
         max_calls: int = DEFAULT_MAX_CALLS,
     ) -> "GuardedToolkit":
-        """Load and profile a CSV, then wrap it. The profile *is* the schema validation runs against."""
+        """Load and profile a CSV, then wrap it. The profile is the schema validation runs against."""
         csv_path = Path(path)
         df = load_csv(csv_path)
         profile = profile_dataframe(df, name=csv_path.name)
@@ -125,7 +118,7 @@ class GuardedToolkit:
         try:
             self._cap.spend()
         except CallCapExceeded as exc:
-            # Log before re-raising: a run that ends at the cap should still show what it wanted next.
+            # Log before re-raising, so the capped call still appears in the record.
             self._audit.record(function_name, attempted, OUTCOME_CAPPED, detail=str(exc))
             raise
 
@@ -158,8 +151,8 @@ class GuardedToolkit:
             detail = f"{type(exc).__name__}: {exc}"
             self._audit.record(function_name, resolved, OUTCOME_ERROR, detail=detail,
                                duration_ms=elapsed)
-            # Deliberately not remembered: a call that crashed produced no answer to reuse, and a
-            # toolkit bug that is fixed mid-session should not leave the call permanently refused.
+            # Not remembered: a crashed call produced no answer to reuse, and a fixed toolkit bug
+            # should not leave the call permanently refused.
             return ToolResult(ok=False, function=function_name, error=detail,
                               error_code=EXECUTION_ERROR, resolved=resolved, signature=signature)
 
@@ -173,12 +166,11 @@ class GuardedToolkit:
 
 
 def _summarise(data: dict[str, Any]) -> str:
-    """A short, fixed-size note about a result — enough to read the log, not enough to bloat it."""
+    """A short, fixed-size note about a result, for the audit log."""
     if not isinstance(data, dict):
         return type(data).__name__
     headline = []
-    # Both stratification flags, not just one: a reversal and an attenuation are different failures,
-    # and grading a run later means being able to see which one the agent was shown.
+    # Both stratification flags are reported: a reversal and an attenuation are different results.
     for key in ("n", "n_rows", "n_outliers", "n_groups_total", "n_distinct",
                 "sign_reversal", "attenuated"):
         if key in data:
