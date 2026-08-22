@@ -1,10 +1,10 @@
-# Day 6 — `store_monthly_sales` only
+# Round 3 — `store_monthly_sales` only
 
-One dataset, run alone on the Day 6 code (`c5d159e`). `marketing_weekly` and
+One dataset, run alone on the Round 3 code (`776b865`). `marketing_weekly` and
 `training_productivity` were deliberately **not** re-run: quota allows roughly one more full run and
-it is being held in reserve. Their Day 5 verdicts stand and are not re-graded here.
+it is being held in reserve. Their Round 2 verdicts stand and are not re-graded here.
 
-Trace: [`reports/traces/graded/day6/`](../reports/traces/graded/day6/). 12/12 calls, 14 turns,
+Trace: [`reports/traces/graded/round3/`](../reports/traces/graded/round3/). 12/12 calls, 14 turns,
 68,881 tokens, model finished and wrote up.
 
 ## Verdict: PARTIAL
@@ -28,13 +28,13 @@ Exact. The November bump is not mentioned anywhere, and the pooled mean (77,867)
 as typical, so neither fail condition is triggered.
 
 **The denominator is right, too.** It says "8.32× higher than the lowest-earning store", which is
-what `highest_over_lowest_ratio` actually measures. The Day 3 bug — reading that same 8.32 as "8.3×
+what `highest_over_lowest_ratio` actually measures. The earlier bug — reading that same 8.32 as "8.3×
 the overall mean" — does not recur.
 
 But the report also contains a second numbered finding that is the same anomaly one level coarser,
 carrying a claim its own evidence refutes. That caps it at partial.
 
-| Day 3 | Day 4 | Day 5 | Day 6 |
+| diagnostic | Round 1 | Round 2 | Round 3 |
 |---|---|---|---|
 | not graded (diagnostic) | aborted, not gradeable | PARTIAL — blamed the East region | **PARTIAL** — names STORE_07 at 8.32×, then blames East anyway |
 
@@ -58,11 +58,11 @@ that it is the first failure of "one signal is one finding". Both cannot be true
 
 **The case for PARTIAL**, which is what I now think is right:
 
-1. **"Three times" is an observation, not a threshold.** That number came from a Day 3 diagnostic
+1. **"Three times" is an observation, not a threshold.** That number came from a pre-grading diagnostic
    where STORE_07 was reported across `revenue_usd`, `units_sold` and `foot_traffic` — three
    columns. It describes the failure mode; it was never meant as a count that two occurrences slip
    under. Grading on the letter while the plain intent is violated is the flattering reading, and
-   this document said in the Day 5 round that the flattering reading is not the one to take.
+   this document said in the Round 2 round that the flattering reading is not the one to take.
 2. **Finding 2 is not merely redundant, it is wrong.** "The difference persists across all stores"
    was never tested — no within-region store comparison was run — and call 12 refutes it directly:
    one store sits at 8.32× the lowest. A reader acting on finding 2 investigates regional market
@@ -74,7 +74,7 @@ that it is the first failure of "one signal is one finding". Both cannot be true
    not be there. Applying a stricter standard to one dataset than the other would make the two
    grades incomparable, which defeats the point of having a fixed rubric at all.
 
-**Verdict: PARTIAL.** The localisation is genuinely right and that is real progress from Day 5 —
+**Verdict: PARTIAL.** The localisation is genuinely right and that is real progress from Round 2 —
 recorded plainly below — but a report that names the store and then tells the reader the region is
 the story has not finished the job.
 
@@ -111,7 +111,7 @@ named and this is a fail rather than a partial.
 
 Two things follow. `detect_outliers` ran for the first time on this dataset in any round (34 of 288
 rows), and the run reached the plan's item 5 — *"detect_outliers on revenue_usd ... then group_compare
-by store_id or region to locate which segment"* — which existed in Day 5's plan too and was never
+by store_id or region to locate which segment"* — which existed in Round 2's plan too and was never
 executed.
 
 ### 2. STORE_07, or the East-region framing again?
@@ -127,11 +127,11 @@ second time, one level coarser, as an independent finding — and the clause "th
 across all stores" is **unsupported and contradicted by its own evidence**: it never compared stores
 within a region, and its own call 12 shows one store at eight times the lowest.
 
-So the Day 5 misattribution is not repeated — the store is named first and correctly — but the
+So the Round 2 misattribution is not repeated — the store is named first and correctly — but the
 region finding was not retired once the store explained it.
 
 **This is the first real test of "one signal is one finding", and it failed** — and it is why the
-grade is PARTIAL rather than PASS. That rule has been carried as *untested* since Day 4 because the
+grade is PARTIAL rather than PASS. That rule has been carried as *untested* since Round 1 because the
 dataset that exercises it never completed. It has now run, and the run double-counted exactly the
 way the rule was written to prevent.
 
@@ -158,10 +158,10 @@ evidence for each — which is weaker than attribution, and is not a substitute 
   [DUPLICATE_CALL] This exact call has already run in this session and returned: pearson_r=0.9974 ...
 ```
 
-The model attempted the same repeat that consumed four calls in Day 5. It was refused once, and the
+The model attempted the same repeat that consumed four calls in Round 2. It was refused once, and the
 next turn moved to a different call — that signature never reappears.
 
-| | Day 5 | Day 6 |
+| | Round 2 | Round 3 |
 |---|---|---|
 | attempts at `compute_correlation(foot_traffic, units_sold)` | 4 | 2 |
 | calls wasted on it | 3 | 1 |
@@ -171,13 +171,13 @@ Two extra distinct calls, and the planted finding was reached on call 12. Withou
 around the equivalent of call 10 — before `detect_outliers` and before `group_compare(store_id, …)`.
 That is a coherent causal story and it is the strongest of the three. It is still one run.
 
-**The schema fix: observably changed the planning input, unlikely to be the cause.** Day 5's planning
+**The schema fix: observably changed the planning input, unlikely to be the cause.** Round 2's planning
 reasoning guessed at the toolkit — *"maybe others? Not listed but typical toolkit includes … But we
-assume these."* Day 6's opens *"Use all functions"* and enumerates all five, `get_summary_stats` and
+assume these."* Round 3's opens *"Use all functions"* and enumerates all five, `get_summary_stats` and
 `value_counts` included. The guessing is gone.
 
 But it then dropped both of those from the plan ("That's more than 6 … Choose top 5") and never
-called either. More importantly, **the plan was never the bottleneck**: Day 5's plan already
+called either. More importantly, **the plan was never the bottleneck**: Round 2's plan already
 contained the correct item 5. Better knowledge of a toolkit cannot explain reaching a step the
 previous plan also specified and simply ran out of budget before.
 
@@ -218,7 +218,7 @@ prompt changes in place, and again with the reverse. That is two runs, and quota
    `group_compare(region, …)` and `group_compare(store_id, …)` on the same column, reported as two
    findings, with the coarser one carrying an unsupported "persists across all stores".
 2. **Attribution**, if it matters enough to spend two runs: same dataset, one fix disabled at a time.
-3. `marketing_weekly` and `training_productivity` have not been run on Day 6 code. The prompt was
+3. `marketing_weekly` and `training_productivity` have not been run on Round 3 code. The prompt was
    rewritten around the two rules they verify, so those verdicts are stale even though the rules
    held here.
 4. The margin is one call. Twelve is not a comfortable budget for this dataset: the only finding
@@ -228,5 +228,5 @@ prompt changes in place, and again with the reverse. That is two runs, and quota
 
 ```bash
 python -m agent.run data/test_datasets/store_monthly_sales.csv --max-calls 12 \
-    --trace-dir reports/traces/graded/day6
+    --trace-dir reports/traces/graded/round3
 ```

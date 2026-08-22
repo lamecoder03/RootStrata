@@ -206,7 +206,7 @@ def marketing(audit: AuditLog) -> None:
     section("calls the guardrails refuse")
     attempt(kit, "get_summary_stats", {"column": "region"},
             "Right function, wrong kind of column. Note the message names columns that WOULD "
-            "work -- that is what lets the Day 3 agent correct itself instead of giving up.")
+            "work -- that is what lets the agent correct itself instead of giving up.")
     attempt(kit, "compute_correlation", {"col_a": "region", "col_b": "week_start"},
             "Correlating two non-numeric columns. Caught on col_a before pandas is touched.")
     attempt(kit, "compute_correlation", {"col_a": "conversions", "col_b": "conversions"},
@@ -349,7 +349,7 @@ def show_audit(audit: AuditLog) -> None:
 
 def main() -> None:
     banner("RootStrata -- toolkit and guardrail walkthrough",
-           "Day 2: the fixed action space, and the three things that constrain it")
+           "The fixed action space, and the three things that constrain it")
     wrapped(
         "Every call below goes through GuardedToolkit.call(), which charges the call cap, "
         "validates the arguments against the loaded file's real profile, runs the tool, and "

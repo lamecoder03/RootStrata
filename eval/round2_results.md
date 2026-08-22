@@ -1,14 +1,14 @@
-# Day 5 — formal grading
+# Round 2 — formal grading
 
-Graded against the pass/partial/fail criteria in [`ground_truth.md`](ground_truth.md), written on
-Day 1 before the agent existed. Traces: [`reports/traces/graded/day5/`](../reports/traces/graded/day5/).
+Graded against the pass/partial/fail criteria in [`ground_truth.md`](ground_truth.md), written
+before the agent existed. Traces: [`reports/traces/graded/round2/`](../reports/traces/graded/round2/).
 
-These runs were made *after* the two Day 5 prompt rules and were never used to tune them. The Day 4
-round, which the rules were derived from, is preserved unchanged in `graded/day4/`.
+These runs were made *after* the two Round 2 prompt rules and were never used to tune them. The Round 1
+round, which the rules were derived from, is preserved unchanged in `graded/round1/`.
 
 ## Result
 
-| dataset | verdict | Day 4 | movement |
+| dataset | verdict | Round 1 | movement |
 |---|---|---|---|
 | `training_productivity` — the trap | **PASS** | never graded | **first pass ever recorded** |
 | `marketing_weekly` | **PARTIAL** | FAIL | **recovered, not fixed** |
@@ -40,7 +40,7 @@ matches the toolkit's return value exactly. Checked against the audit logs, pair
 | `tenure_months` × `output_points` | region | False / False | False / False |
 | `weekly_training_hours` × `peer_review_score` | role_tier | False / **True** | False / **True** |
 
-The Day 4 failure was one fabricated `attenuated` on `website_visits` × `conversions`, justified
+The Round 1 failure was one fabricated `attenuated` on `website_visits` × `conversions`, justified
 with arithmetic that was simply false. That exact pair now reads `attenuated = False` with the
 correct subgroup range. **Zero fabrications in twelve opportunities.**
 
@@ -80,7 +80,7 @@ sided with the disqualifying one:
 > Stratified by **role_tier**: sign_reversal = true … Stratified by **region**: sign_reversal =
 > false … The pooled positive correlation is an artefact of mixing role tiers.
 
-That is the "confidence follows the worst stratification you ran" rule, added on Day 4 and recorded
+That is the "confidence follows the worst stratification you ran" rule, added on Round 1 and recorded
 as **untested** because the dataset that would exercise it never ran. It is now tested and it holds.
 It did the same on `tenure_months`, where `region` again looked clean (r 0.84–0.87) and `role_tier`
 returned `attenuated = True`.
@@ -114,7 +114,7 @@ relationship the worst stratification zeroes out. Not enough to change the verdi
 > property of the data construction, not a substantive marketing insight, and should not be
 > presented as a "strong finding".
 
-Compare Day 4, which led with the same pair and called it *reliable* **because** it survived
+Compare Round 1, which led with the same pair and called it *reliable* **because** it survived
 stratification. The reasoning has inverted. The planted finding is present and correct at r = 0.7999
 with its stratification quoted.
 
@@ -226,21 +226,21 @@ never deleted — so one file is always one run.
 
 ---
 
-## Status of every fix, across Day 4 and Day 5
+## Status of every fix, across Round 1 and Round 2
 
 | fix | origin | status |
 |---|---|---|
-| Ratio denominators labelled at both layers | Day 4 | verified (Day 4) |
-| `attenuated` logged in the audit summary | Day 4 | verified (Day 4) |
-| `attenuated` given equal weight to `sign_reversal` | Day 4 | backfired, then superseded by rule 2 |
-| Confidence follows the worst stratification | Day 4 | **verified here** — trap dataset, both pairs |
-| One signal is one finding | Day 4 | **untested still** — the store run reported four distinct signals, none duplicated, so nothing exercised it |
-| Rule 1: high r is a suspect, check for derivation | Day 5 | **partly verified** — correct on all four identities across two datasets; ranking still wrong on marketing |
-| Rule 2: quote the flags, never recompute | Day 5 | **verified** — 12 of 12 exact |
-| Ledger deduplicates by call signature | Day 5 | **works, and insufficient** — repeat collapsed and counted; the model repeated it anyway |
-| One audit log is one run (`_fresh_audit_path`) | Day 5 | new — found when two runs concatenated into one file |
-| `context_floor` / `check_context_headroom` | Day 5 | held: three runs, no over-budget request |
-| `DailyQuotaExhausted`, `preflight()` | Day 5 | held: the third run refused to start on 11 tokens |
+| Ratio denominators labelled at both layers | Round 1 | verified (Round 1) |
+| `attenuated` logged in the audit summary | Round 1 | verified (Round 1) |
+| `attenuated` given equal weight to `sign_reversal` | Round 1 | backfired, then superseded by rule 2 |
+| Confidence follows the worst stratification | Round 1 | **verified here** — trap dataset, both pairs |
+| One signal is one finding | Round 1 | **untested still** — the store run reported four distinct signals, none duplicated, so nothing exercised it |
+| Rule 1: high r is a suspect, check for derivation | Round 2 | **partly verified** — correct on all four identities across two datasets; ranking still wrong on marketing |
+| Rule 2: quote the flags, never recompute | Round 2 | **verified** — 12 of 12 exact |
+| Ledger deduplicates by call signature | Round 2 | **works, and insufficient** — repeat collapsed and counted; the model repeated it anyway |
+| One audit log is one run (`_fresh_audit_path`) | Round 2 | new — found when two runs concatenated into one file |
+| `context_floor` / `check_context_headroom` | Round 2 | held: three runs, no over-budget request |
+| `DailyQuotaExhausted`, `preflight()` | Round 2 | held: the third run refused to start on 11 tokens |
 
 ## What is owed
 
@@ -258,8 +258,8 @@ never deleted — so one file is always one run.
 ## Reproducing this
 
 ```bash
-python -m agent.run data/test_datasets/<file>.csv --max-calls 12 --trace-dir reports/traces/graded/day5
+python -m agent.run data/test_datasets/<file>.csv --max-calls 12 --trace-dir reports/traces/graded/round2
 ```
 
-Every number above is checkable: `reports/traces/graded/day5/` holds the transcripts and the
+Every number above is checkable: `reports/traces/graded/round2/` holds the transcripts and the
 append-only audit logs, and the flag table was built by reading the audit logs, not the reports.

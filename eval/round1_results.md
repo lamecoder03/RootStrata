@@ -1,7 +1,7 @@
-# Day 4 — formal grading
+# Round 1 — formal grading
 
 Graded against the pass/partial/fail criteria in [`ground_truth.md`](ground_truth.md), which were
-written on Day 1, before the agent existed.
+written before the agent existed.
 
 ## Status: 1 of 3 datasets graded
 
@@ -14,13 +14,13 @@ available accounts were exhausted before the second and third fresh runs could f
 | `store_monthly_sales` | aborted at turn 12 after 11 calls (daily token cap) | no — it never wrote conclusions |
 | `training_productivity` | aborted at turn 0, 0 calls | no — never started |
 
-The two aborted runs still produced traces, which is itself the Day 3 crash-safety fix working:
+The two aborted runs still produced traces, which is itself the crash-safety fix working:
 before it, an API failure destroyed the whole run. `store_monthly_sales` has 11 calls of complete,
 trustworthy evidence and no conclusion drawn from it.
 
-**This document does not grade the Day 3 diagnostic traces.** Those runs are what the Day 4 fixes
+**This document does not grade the pre-grading diagnostic traces.** Those runs are what the Round 1 fixes
 were derived from, so scoring the fixes against them would be marking my own homework. They are
-kept in `reports/traces/diagnostics/` as the debugging record; `reports/traces/graded/day4/` holds the
+kept in `reports/traces/diagnostics/` as the debugging record; `reports/traces/graded/round1/` holds the
 fresh runs, and only those are scored here.
 
 ---
@@ -86,7 +86,7 @@ shows every subgroup bar clearly above zero, with Central beyond the pooled line
 
 ### Compared with the diagnostic run
 
-| | Day 3 diagnostic (18 calls) | Day 4 fresh (12 calls) |
+| | diagnostic (18 calls) | Round 1 fresh (12 calls) |
 |---|---|---|
 | Planted r = 0.800 found and stratified | yes, as finding #1 | yes, as finding #3 |
 | `impressions` tautology | reported at #2, explicitly called *"mechanically derived from spend… adds little new insight"* | **reported at #1 as reliable** |
@@ -98,7 +98,7 @@ One decoy handled better, one handled worse, and a new class of error. Net: a re
 
 ---
 
-## What the Day 4 fixes did, and did not, achieve
+## What the Round 1 fixes did, and did not, achieve
 
 Four fixes went in before these runs. Their status, honestly:
 
@@ -125,7 +125,7 @@ Two of the prompt changes plausibly interact badly, and the trace supports it:
 
 The second is the more serious design error, and it is mine, not the model's: I wrote a rule that
 rewards surviving stratification without any counterweight for whether the relationship was
-*interesting* to begin with. The Day 3 prompt had that counterweight closer to the surface.
+*interesting* to begin with. The earlier prompt had that counterweight closer to the surface.
 
 **Not fixed in this session, deliberately.** Both diagnoses come from a single graded run. Changing
 the prompt again on that basis, then grading against the same run, is the exact loop this document
@@ -157,7 +157,7 @@ re-measuring.
 ## `training_productivity.csv` — not run
 
 The daily cap was reached before turn 1. This is the dataset that matters most and the one where
-the "confidence follows the worst stratification" rule was aimed, so the central question of Day 4
+the "confidence follows the worst stratification" rule was aimed, so the central question of Round 1
 is still open.
 
 ---
@@ -173,11 +173,11 @@ is still open.
 ## Reproducing this
 
 ```bash
-python -m agent.run data/test_datasets/<file>.csv --max-calls 12 --trace-dir reports/traces/graded/day4
+python -m agent.run data/test_datasets/<file>.csv --max-calls 12 --trace-dir reports/traces/graded/round1
 python reports/generate_report.py data/test_datasets/<file>.csv \
-    --trace-dir reports/traces/graded/day4 --out-dir reports/generated
+    --trace-dir reports/traces/graded/round1 --out-dir reports/generated
 ```
 
-Every number quoted above is checkable: `reports/traces/graded/day4/` holds the full transcripts and
+Every number quoted above is checkable: `reports/traces/graded/round1/` holds the full transcripts and
 audit logs, and `generate_report.py` rebuilds its evidence table by replaying the audit log through
 the toolkit, so a report can only ever cite a call that was actually made.

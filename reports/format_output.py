@@ -716,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="badge for the report; only valid when converting a single file")
     parser.add_argument("--verdicts", type=Path, default=None,
                         help="JSON map of report stem -> verdict, e.g. "
-                             '{"marketing_weekly_report": {"verdict": "PARTIAL", "round": "Day 5"}}'
+                             '{"marketing_weekly_report": {"verdict": "PARTIAL", "round": "Round 2"}}'
                              " (default: verdicts.json beside the reports, if present)")
     parser.add_argument("--no-embed", action="store_true",
                         help="link charts instead of inlining them as base64")
