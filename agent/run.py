@@ -108,7 +108,7 @@ def _fresh_audit_path(path: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m agent.run",
-        description="Run the AutoSight planning loop over one CSV and save a reasoning trace.",
+        description="Run the RootStrata planning loop over one CSV and save a reasoning trace.",
     )
     parser.add_argument("csv_path", help="the CSV to investigate")
     parser.add_argument(

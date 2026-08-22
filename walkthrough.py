@@ -327,7 +327,7 @@ def call_cap_demo(audit: AuditLog) -> None:
         except CallCapExceeded as exc:
             print(f"    {function}(...) -> RAISED CallCapExceeded: {exc}")
             print("\n  It raised. It did not return False for a caller to forget to check --")
-            print("  that is the entire point of the guarantee in CLAUDE.md.")
+            print("  that is the entire point of the guarantee.")
 
 
 def show_audit(audit: AuditLog) -> None:
@@ -348,7 +348,7 @@ def show_audit(audit: AuditLog) -> None:
 
 
 def main() -> None:
-    banner("AutoSight -- toolkit and guardrail walkthrough",
+    banner("RootStrata -- toolkit and guardrail walkthrough",
            "Day 2: the fixed action space, and the three things that constrain it")
     wrapped(
         "Every call below goes through GuardedToolkit.call(), which charges the call cap, "

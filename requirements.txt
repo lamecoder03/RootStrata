@@ -1,4 +1,4 @@
-# AutoSight runtime dependencies.
+# RootStrata runtime dependencies.
 # Floors, not pins: these are the oldest versions the code is written against.
 # Verified locally on pandas 3.0.5 / numpy 2.5.1 / scipy 1.18.0 / matplotlib 3.11.1, Python 3.14.
 

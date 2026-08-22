@@ -1,4 +1,4 @@
-# AutoSight — Autonomous Dataset Insight Agent
+# RootStrata — Autonomous Dataset Insight Agent
 
 Point it at a CSV it has never seen. It decides what is worth investigating, investigates,
 and writes a markdown findings report with supporting charts.

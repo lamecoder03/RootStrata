@@ -208,7 +208,7 @@ def format_profile(profile: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Profile a CSV for the AutoSight agent.")
+    parser = argparse.ArgumentParser(description="Profile a CSV for the RootStrata agent.")
     parser.add_argument("csv_path", help="path to the CSV to profile")
     parser.add_argument("--json", action="store_true", help="emit the raw profile dict as JSON")
     args = parser.parse_args()

@@ -30,7 +30,7 @@ VERDICT_STYLES = {
     "FAIL":    ("#b8352b", "#fbeae8", "#eec4bf"),
 }
 
-PROJECT_NAME = "AutoSight"
+PROJECT_NAME = "RootStrata"
 PROJECT_TAGLINE = "Autonomous Dataset Insight Agent"
 
 # Words that must survive into the page. Link and image destinations are the one exception: they
@@ -608,7 +608,7 @@ def build_page(markdown: str, source: Path, verdict=None, embed_images: bool = T
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
-<meta name="generator" content="AutoSight format_output.py (presentation layer)">
+<meta name="generator" content="RootStrata format_output.py (presentation layer)">
 <style>{STYLESHEET}</style>
 </head>
 <body>
