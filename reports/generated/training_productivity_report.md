@@ -85,5 +85,5 @@ These limitations do not affect the core findings reported above.
 - **Dataset:** `training_productivity.csv` — 450 rows, 7 columns, 0 duplicates
 - **Agent:** chose and ran 12 of a possible 12 analyses from a fixed five-function toolkit. It never wrote or executed code.
 - **Guardrails:** 12 calls attempted, 12 allowed.
-- **Full reasoning trace:** `reports\traces\graded\day5\training_productivity_trace.md`
+- **Full reasoning trace:** `training_productivity_trace.md`, under `reports/traces/graded/`
 

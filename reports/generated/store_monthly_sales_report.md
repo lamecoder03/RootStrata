@@ -100,5 +100,5 @@ The agent can only call five fixed analysis functions. It recorded these as ques
 - **Dataset:** `store_monthly_sales.csv` — 288 rows, 8 columns, 0 duplicates
 - **Agent:** chose and ran 12 of a possible 12 analyses from a fixed five-function toolkit. It never wrote or executed code.
 - **Guardrails:** 12 calls attempted, 12 allowed.
-- **Full reasoning trace:** `reports\traces\graded\day5\store_monthly_sales_trace.md`
+- **Full reasoning trace:** `store_monthly_sales_trace.md`, under `reports/traces/graded/`
 

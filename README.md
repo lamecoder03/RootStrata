@@ -3,9 +3,11 @@
 Point it at a CSV it has never seen. It decides what is worth investigating, investigates,
 and writes a markdown findings report with supporting charts.
 
-> **Status: Day 3 complete.** Profiler, toolkit, guardrails and the planning loop all run. The
-> agent investigates a CSV end to end and saves a readable reasoning trace. Reports and the
-> formal eval are next.
+> **Status: built and graded.** Profiler, toolkit, guardrails, planning loop, report writer and
+> charts all run. The agent investigates a CSV end to end, saves a readable reasoning trace, and
+> writes a findings report. All three eval datasets have been graded against
+> [`eval/ground_truth.md`](eval/ground_truth.md): the Simpson's-paradox trap **passes**, the
+> other two are **partial**. The grading records are in `eval/`.
 
 ---
 
@@ -159,7 +161,8 @@ can be explained line by line.
 
 ## Roadmap
 
-- [x] **Day 1** — scaffold, profiler, eval fixtures, ground truth
-- [x] **Day 2** — the toolkit, the three guardrails, tests, walkthrough
-- [x] **Day 3** — the hand-written planning loop, traces, `--focus`
-- [ ] **Day 4** — the report writer, charts, and grading against ground truth
+- [x] Scaffold, profiler, eval fixtures, ground truth
+- [x] The toolkit, the three guardrails, tests, walkthrough
+- [x] The hand-written planning loop, traces, `--focus`
+- [x] The report writer, charts, and grading against ground truth
+- [x] HTML formatting layer for the generated reports
